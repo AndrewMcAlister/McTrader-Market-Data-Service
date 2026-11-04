@@ -61,7 +61,12 @@ pub fn document() -> Value {
                     "summary": "Store the vendor key in this account's keyring and use it",
                     "operationId": "post_eodhd_secret_secrets_eodhd_post",
                     "parameters": [admin_token_parameter()],
-                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EodhdKeyRequest"}}}},
+                    "requestBody": {"required": true, "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/EodhdKeyRequest"},
+                        "examples": {
+                            "store_a_key": {"summary": "Store the vendor key in this account's keyring", "value": {"api_key": "your-EODHD-api-key"}}
+                        }
+                    }}},
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
                         "400": {"description": "The key is blank", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
@@ -87,7 +92,14 @@ pub fn document() -> Value {
                     "summary": "Pull the whole market's daily bars, on demand",
                     "operationId": "post_refresh_refresh_post",
                     "parameters": [admin_token_parameter()],
-                    "requestBody": {"required": false, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefreshRequest"}}}},
+                    "requestBody": {"required": false, "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/RefreshRequest"},
+                        "examples": {
+                            "today_us": {"summary": "Pull today's US session with every default", "value": {}},
+                            "asx_session": {"summary": "Pull a named ASX session", "value": {"market": "AU", "session_date": "2026-11-03"}},
+                            "forced_backfill": {"summary": "Pull again over today's ledger entry, without rebuilding indicators", "value": {"market": "US", "session_date": "2026-11-03", "force": true, "include_indicators": false}}
+                        }
+                    }}},
                     "responses": {
                         "200": {"description": "Already fresh; nothing was spent", "content": {"application/json": {"schema": {"type": "object"}}}},
                         "202": {"description": "The pull ran", "content": {"application/json": {"schema": {"type": "object"}}}},
@@ -115,7 +127,9 @@ pub fn document() -> Value {
                     "operationId": "post_schedule_run_schedule_run_post",
                     "parameters": [
                         admin_token_parameter(),
-                        {"name": "market", "in": "query", "required": false, "schema": {"type": "string", "default": "US"}, "description": "US or AU"}
+                        {"name": "market", "in": "query", "required": false,
+                         "schema": {"type": "string", "enum": ["US", "AU"], "default": "US", "example": "US"},
+                         "description": "Which market to collect now: US or AU."}
                     ],
                     "responses": {
                         "200": {"description": "The run succeeded", "content": {"application/json": {"schema": {"type": "object"}}}},
@@ -148,14 +162,16 @@ pub fn document() -> Value {
                     "summary": "The session a broker's rule resolves at an instant",
                     "operationId": "get_market_session_market_session_get",
                     "parameters": [
-                        {"name": "broker_id", "in": "query", "required": false, "schema": {"type": "integer", "default": 1}},
-                        {"name": "asset_class", "in": "query", "required": false, "schema": {"type": "string", "default": "shares"}},
-                        {"name": "at", "in": "query", "required": false, "schema": {"type": ["string", "null"]}}
+                        {"name": "broker_id", "in": "query", "required": false,
+                         "schema": {"type": "integer", "default": 1, "example": 1},
+                         "description": "The broker whose rule is resolved."},
+                        {"name": "at", "in": "query", "required": false,
+                         "schema": {"type": ["string", "null"], "example": "2026-11-04T14:30:00Z"},
+                         "description": "ISO-8601 instant; defaults to now. The shares rule is always the one resolved."}
                     ],
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
-                        "400": {"description": "Malformed instant", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
-                        "404": {"description": "Unknown asset class", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+                        "400": {"description": "Malformed instant", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
                     }
                 }
             },
@@ -223,11 +239,14 @@ pub fn document() -> Value {
                     "summary": "One symbol's quote",
                     "operationId": "get_price_price__symbol__get",
                     "parameters": [
-                        {"name": "symbol", "in": "path", "required": true, "schema": {"type": "string"}},
-                        {"name": "country_code", "in": "query", "required": true, "schema": {"type": "string", "enum": ["US", "AU"]}, "description": "The country the ticker belongs to; required"},
-                        {"name": "exchange", "in": "query", "required": false, "schema": {"type": ["string", "null"]}, "description": "Optional second spelling of the country: US, AU/ASX, L, TO, HK, F, PA; must agree with country_code"},
-                        {"name": "max_age_seconds", "in": "query", "required": false, "schema": {"type": ["number", "null"]}},
-                        {"name": "asset_class", "in": "query", "required": false, "schema": {"type": ["string", "null"]}}
+                        {"name": "symbol", "in": "path", "required": true,
+                         "schema": {"type": "string", "example": "AAPL"},
+                         "description": "Bare ticker or one with a market suffix, such as CBA.AU."},
+                        {"name": "country_code", "in": "query", "required": true, "schema": country_schema()},
+                        {"name": "exchange", "in": "query", "required": false, "schema": exchange_schema()},
+                        {"name": "max_age_seconds", "in": "query", "required": false,
+                         "schema": {"type": ["number", "null"], "minimum": 0, "example": 60},
+                         "description": "Maximum cache age in seconds. The default is 300; a caller may only ask for something newer, never staler."}
                     ],
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
@@ -243,7 +262,13 @@ pub fn document() -> Value {
                     "tags": ["market data"],
                     "summary": "Quotes for up to 200 symbols",
                     "operationId": "post_prices_prices_post",
-                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PricesRequest"}}}},
+                    "requestBody": {"required": true, "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/PricesRequest"},
+                        "examples": {
+                            "us_batch": {"summary": "Three US tickers, cache may be at most 60 seconds old", "value": {"symbols": ["AAPL", "MSFT", "NVDA"], "country_code": "US", "max_age_seconds": 60}},
+                            "asx_batch": {"summary": "Two ASX tickers with the exchange spelled out", "value": {"symbols": ["CBA", "BHP"], "country_code": "AU", "exchange": "ASX"}}
+                        }
+                    }}},
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
                         "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}}
@@ -255,7 +280,14 @@ pub fn document() -> Value {
                     "tags": ["market data"],
                     "summary": "ATR and optional stop levels",
                     "operationId": "post_atr_atr_post",
-                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AtrRequest"}}}},
+                    "requestBody": {"required": true, "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/AtrRequest"},
+                        "examples": {
+                            "default_definition": {"summary": "ATR only, using period 14, method tr and smoothing simple", "value": {"symbols": ["AAPL", "MSFT"], "country_code": "US"}},
+                            "stop_levels": {"summary": "ATR and a long stop two ATRs below the given price", "value": {"symbols": ["AAPL"], "country_code": "US", "period": 14, "method": "tr", "smoothing": "simple", "price": 231.4, "multiplier": 2.0, "direction": "long"}},
+                            "wilder_high_low": {"summary": "Every non-default option spelled out", "value": {"symbols": ["CBA"], "country_code": "AU", "exchange": "ASX", "period": 21, "method": "high_low", "smoothing": "wilder", "price": 118.2, "multiplier": 3.0, "direction": "short"}}
+                        }
+                    }}},
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
                         "400": {"description": "A price without a multiplier, or insufficient history", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
@@ -268,7 +300,13 @@ pub fn document() -> Value {
                     "tags": ["market data"],
                     "summary": "Completed daily bars, cached or fetched",
                     "operationId": "post_bars_bars_post",
-                    "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BarsRequest"}}}},
+                    "requestBody": {"required": true, "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/BarsRequest"},
+                        "examples": {
+                            "cache_only": {"summary": "Fifteen completed sessions from the cache, never calling a vendor", "value": {"symbols": ["AAPL"], "country_code": "US", "sessions": 15, "allow_fetch": false}},
+                            "asx_history": {"summary": "A year of ASX history, fetching when the cache is short", "value": {"symbols": ["CBA.AU"], "country_code": "AU", "exchange": "ASX", "sessions": 250}}
+                        }
+                    }}},
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
                         "400": {"description": "Exchange or symbol refusal", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
@@ -305,54 +343,75 @@ pub fn document() -> Value {
                 "PricesRequest": {
                     "type": "object",
                     "properties": {
-                        "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Bare or suffixed symbols"},
-                        "country_code": {"type": "string", "enum": ["US", "AU"], "description": "The country the tickers belong to; required"},
-                        "exchange": {"type": ["string", "null"], "description": "Optional second spelling of the country: US, AU/ASX, L, TO, HK, F, PA; must agree with country_code"},
-                        "max_age_seconds": {"type": ["number", "null"]},
-                        "asset_class": {"type": ["string", "null"]}
+                        "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                    "example": ["AAPL", "MSFT", "NVDA"],
+                                    "description": "One or more bare or suffixed symbols. One request is one market, so every symbol must belong to country_code."},
+                        "country_code": country_schema(),
+                        "exchange": exchange_schema(),
+                        "max_age_seconds": {"type": ["number", "null"], "minimum": 0, "example": 60,
+                                            "description": "Maximum cache age in seconds. The default is 300; a caller may only ask for something newer, never staler."}
                     },
                     "required": ["symbols", "country_code"]
                 },
                 "AtrRequest": {
                     "type": "object",
                     "properties": {
-                        "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "period": {"type": ["integer", "null"], "description": "Default 14"},
-                        "method": {"type": ["string", "null"], "description": "gap (default) or high_low"},
-                        "smoothing": {"type": ["string", "null"], "description": "simple (default) or wilder"},
-                        "country_code": {"type": "string", "enum": ["US", "AU"], "description": "The country the tickers belong to; required"},
-                        "exchange": {"type": ["string", "null"], "description": "Optional second spelling of the country: US, AU/ASX, L, TO, HK, F, PA; must agree with country_code"},
-                        "price": {"type": ["number", "null"]},
-                        "multiplier": {"type": ["number", "null"]},
-                        "direction": {"type": ["string", "null"], "description": "'long' (default) or 'short'"},
-                        "asset_class": {"type": ["string", "null"]}
+                        "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                    "example": ["AAPL", "MSFT"],
+                                    "description": "One or more bare or suffixed symbols, all in country_code."},
+                        "period": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}],
+                                   "default": 14, "example": 14,
+                                   "description": "Sessions in the average. Default 14."},
+                        "method": {"anyOf": [{"type": "string", "enum": ["tr", "high_low"]}, {"type": "null"}],
+                                   "default": "tr", "example": "tr",
+                                   "description": "tr (default, gap-inclusive true range) or high_low (high minus low only)."},
+                        "smoothing": {"anyOf": [{"type": "string", "enum": ["simple", "wilder"]}, {"type": "null"}],
+                                      "default": "simple", "example": "simple",
+                                      "description": "simple (default, the N-bar mean) or wilder (Wilder's recursion)."},
+                        "country_code": country_schema(),
+                        "exchange": exchange_schema(),
+                        "price": {"type": ["number", "null"], "example": 231.4,
+                                  "description": "Reference price for a stop level. Supplying it without multiplier is a 400 incomplete-stop."},
+                        "multiplier": {"type": ["number", "null"], "example": 2.0,
+                                       "description": "The ATR multiple for the stop level. Never defaulted, because the books use 1.0, 2.0 and 3.0."},
+                        "direction": {"anyOf": [{"type": "string", "enum": ["long", "short"]}, {"type": "null"}],
+                                      "default": "long", "example": "long",
+                                      "description": "Which side of price the stop sits on."}
                     },
                     "required": ["symbols", "country_code"]
                 },
                 "BarsRequest": {
                     "type": "object",
                     "properties": {
-                        "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-                        "sessions": {"type": "integer", "minimum": 1, "default": 15, "description": "Completed sessions to return"},
-                        "country_code": {"type": "string", "enum": ["US", "AU"], "description": "The country the tickers belong to; required"},
-                        "exchange": {"type": ["string", "null"], "description": "Optional second spelling of the country: US, AU/ASX, L, TO, HK, F, PA; must agree with country_code"},
-                        "allow_fetch": {"type": "boolean", "default": true},
-                        "asset_class": {"type": ["string", "null"]}
+                        "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                    "example": ["AAPL", "MSFT"],
+                                    "description": "One or more bare or suffixed symbols, all in country_code."},
+                        "sessions": {"type": "integer", "minimum": 1, "default": 15, "example": 15,
+                                     "description": "Completed sessions to return. The session still in progress is always excluded."},
+                        "country_code": country_schema(),
+                        "exchange": exchange_schema(),
+                        "allow_fetch": {"type": "boolean", "default": true, "example": false,
+                                        "description": "false answers only from the cache and never calls a vendor."}
                     },
                     "required": ["symbols", "country_code"]
                 },
                 "EodhdKeyRequest": {
                     "type": "object",
-                    "properties": {"api_key": {"type": "string", "minLength": 1, "description": "The EODHD API key"}},
+                    "properties": {"api_key": {"type": "string", "minLength": 1, "example": "your-EODHD-api-key",
+                                               "description": "The EODHD API key. Never echoed back."}},
                     "required": ["api_key"]
                 },
                 "RefreshRequest": {
                     "type": "object",
                     "properties": {
-                        "market": {"type": "string", "default": "US", "description": "Market to pull; only US is measured"},
-                        "session_date": {"type": ["string", "null"], "description": "YYYY-MM-DD; default is the latest completed session"},
-                        "force": {"type": "boolean", "default": false, "description": "Pull again even if one is already recorded today"},
-                        "include_indicators": {"type": "boolean", "default": true}
+                        "market": {"type": "string", "enum": ["US", "AU"], "default": "US", "example": "US",
+                                   "description": "Which market's daily bars to pull."},
+                        "session_date": {"type": ["string", "null"], "format": "date", "example": "2026-11-03",
+                                         "description": "YYYY-MM-DD. Default is the latest completed session."},
+                        "force": {"type": "boolean", "default": false, "example": false,
+                                  "description": "Pull again even when one is already recorded today. This spends the bulk tariff again."},
+                        "include_indicators": {"type": "boolean", "default": true, "example": true,
+                                               "description": "Rebuild IndicatorCache for the pulled sessions."}
                     }
                 }
             }
@@ -366,9 +425,32 @@ pub fn document() -> Value {
     })
 }
 
+fn country_schema() -> Value {
+    json!({
+        "type": "string",
+        "enum": ["US", "AU"],
+        "example": "US",
+        "description": "The country the tickers belong to. Required: a ticker alone does not name a market, because CBA is both an ASX and a US listing."
+    })
+}
+
+fn exchange_schema() -> Value {
+    json!({
+        "anyOf": [
+            {"type": "string", "enum": [
+                "US", "NYSE", "NASDAQ", "AMEX", "NYSEARCA",
+                "AU", "ASX", "AX", "AUS"
+            ]},
+            {"type": "null"}
+        ],
+        "example": "ASX",
+        "description": "Optional second spelling of the country. US: US, NYSE, NASDAQ, AMEX, NYSEARCA. AU: AU, ASX, AX, AUS. Must agree with country_code; a disagreement is a 400 exchange-conflict."
+    })
+}
+
 fn country_parameter() -> Value {
     json!({"name": "country_code", "in": "query", "required": true,
-           "schema": {"type": "string", "enum": ["US", "AU"]},
+           "schema": country_schema(),
            "description": "Country code: us/US or au/AU; required"})
 }
 

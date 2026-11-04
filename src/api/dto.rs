@@ -150,10 +150,6 @@ fn default_broker_id() -> i64 {
     1
 }
 
-fn default_asset_class() -> String {
-    "shares".to_string()
-}
-
 /// `POST /prices`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PricesRequest {
@@ -164,8 +160,6 @@ pub struct PricesRequest {
     pub country_code: Option<String>,
     #[serde(default)]
     pub max_age_seconds: Option<f64>,
-    #[serde(default)]
-    pub asset_class: Option<String>,
 }
 
 /// `POST /atr`.
@@ -188,8 +182,6 @@ pub struct AtrRequestBody {
     pub multiplier: Option<f64>,
     #[serde(default)]
     pub direction: Option<String>,
-    #[serde(default)]
-    pub asset_class: Option<String>,
 }
 
 /// `POST /bars`.
@@ -204,8 +196,6 @@ pub struct BarsRequestBody {
     pub country_code: Option<String>,
     #[serde(default = "default_true")]
     pub allow_fetch: bool,
-    #[serde(default)]
-    pub asset_class: Option<String>,
 }
 
 /// `POST /secrets/eodhd`.
@@ -247,8 +237,6 @@ pub struct PriceQuery {
     pub country_code: Option<String>,
     #[serde(default)]
     pub max_age_seconds: Option<f64>,
-    #[serde(default)]
-    pub asset_class: Option<String>,
 }
 
 /// `GET /market/clock`.
@@ -263,12 +251,14 @@ pub struct ClockQuery {
 }
 
 /// `GET /market/session`.
+///
+/// The rule resolved is always the `shares` rule: the request no longer names an asset class,
+/// because the vendor taxonomy behind it proved unreliable. The answer still reports the class
+/// it used, so a caller can see that the rule was shares.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SessionQuery {
     #[serde(default = "default_broker_id")]
     pub broker_id: i64,
-    #[serde(default = "default_asset_class")]
-    pub asset_class: String,
     #[serde(default)]
     pub at: Option<String>,
 }

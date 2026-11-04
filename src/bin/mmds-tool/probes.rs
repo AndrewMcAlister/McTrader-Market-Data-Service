@@ -15,16 +15,6 @@ use mmds::store::DailyBarRepository;
 use crate::http::{show, status_text, Api};
 use crate::{open_store, settings, ToolResult};
 
-/// The three symbols `check-index-quote` asks about, and the class each needs.
-const INDEX_PROBES: [(&str, &str); 3] = [
-    ("IXIC", "indices"),
-    ("GSPC", "indices"),
-    ("GLD", "commodities"),
-];
-
-/// A move this large is not a market move; it is a scale error in the previous close.
-const IMPLAUSIBLE_CHANGE_PCT: f64 = 50.0;
-
 /// The widest tier the bulk route prices for one 100-unit call.
 const BULK_PROBE_SYMBOLS: i64 = 150;
 
@@ -32,48 +22,6 @@ const BULK_PROBE_SYMBOLS: i64 = 150;
 const BULK_TIMEOUT: Duration = Duration::from_secs(180);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Ask for each index with the cache bypassed, and flag a previous close that cannot be right.
-pub(crate) async fn check_index_quote(base: &str) -> ToolResult<()> {
-    let api = Api::new(base)?;
-    println!("service: {}", api.base());
-    let mut implausible = 0usize;
-
-    for (symbol, asset_class) in INDEX_PROBES {
-        let path = format!(
-            "/price/{symbol}?country_code=US&asset_class={asset_class}&max_age_seconds=0.001"
-        );
-        let reply = api.get(&path, PROBE_TIMEOUT).await?;
-        let Some(payload) = reply.json() else {
-            println!(
-                "  {symbol:<6} [{}] non-JSON: {}",
-                status_text(&reply),
-                reply.excerpt()
-            );
-            continue;
-        };
-        println!(
-            "  {symbol:<6} [{:>3}] provider={} price={} prev={} chg={}",
-            reply.status,
-            show(&payload, "provider"),
-            show(&payload, "price"),
-            show(&payload, "previous_close"),
-            show(&payload, "change_pct"),
-        );
-        if let Some(change) = payload.get("change_pct").and_then(Value::as_f64) {
-            if change.abs() > IMPLAUSIBLE_CHANGE_PCT {
-                implausible += 1;
-                println!("         ^ STILL WRONG: {change:.2}% move on an index");
-            }
-        }
-    }
-
-    if implausible > 0 {
-        return Err(format!("{implausible} index quote(s) still carry a scale error").into());
-    }
-    println!("all index quotes carry a plausible previous close");
-    Ok(())
-}
 
 /// Prove a 150-symbol batch takes the bulk route: one call, 100 units, not 150 calls.
 ///

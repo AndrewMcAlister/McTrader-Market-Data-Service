@@ -179,14 +179,14 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/price/AAPL"))
-            .and(query_param("asset_class", "indices"))
+            .and(query_param("max_age_seconds", "60"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"price": 231.4})))
             .mount(&server)
             .await;
 
         let proxy = McpProxy::new(server.uri(), Duration::from_secs(5)).unwrap();
         let value = proxy
-            .get("/price/AAPL", &[("asset_class", "indices".into())])
+            .get("/price/AAPL", &[("max_age_seconds", "60".into())])
             .await;
         assert_eq!(value["price"], 231.4);
         assert!(value.get("error").is_none());

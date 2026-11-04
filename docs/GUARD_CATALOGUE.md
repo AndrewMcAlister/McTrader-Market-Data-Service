@@ -20,8 +20,8 @@ the proof that the decision still lives in that file.
   `exchange`/`country_code` that conflicts with the symbol's suffix; a batch mixing suffixes; an
   unknown exchange code.
 - **Clear:** Send `country_code` — `US` or `AU` — with bare symbols, or suffix every symbol the
-  same way and state the matching country. `asset_class=crypto` resolves to `CRYPTO` (the
-  country is required by the request shape but ignored).
+  same way and state the matching country. An internal caller may still state a crypto asset
+  class, which resolves to `CRYPTO`; no HTTP request can.
 - **Config:** none.
 - **Tests:** `src/domain/exchanges.rs` · `exchange_and_country_code_that_disagree_are_refused`
 

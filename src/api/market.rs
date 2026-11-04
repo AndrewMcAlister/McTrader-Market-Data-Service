@@ -110,12 +110,12 @@ pub async fn get_market_session(
     let attributed = caller(&headers);
     with_caller(attributed.as_deref(), async {
         let market = state.market();
-        let Some(asset_class_id) = market.asset_class_id(&query.asset_class) else {
-            return ApiError::reason(
-                StatusCode::NOT_FOUND,
-                format!("unknown asset class {}", py_repr(&query.asset_class)),
-            )
-            .into_response();
+        // The rule resolved is always the shares rule: the request no longer names an asset
+        // class. The reference tables still carry the other rules; a caller reads them from
+        // `/market/exchanges` and no longer picks one here.
+        let Some(asset_class_id) = market.asset_class_id("shares") else {
+            return ApiError::internal("the clock reference has no shares asset class")
+                .into_response();
         };
         let now = state.now_utc();
         let reference = match clock_reference(None, query.at.as_deref(), now) {
@@ -128,7 +128,7 @@ pub async fn get_market_session(
         let mut payload = session.as_json();
         if let Some(object) = payload.as_object_mut() {
             object.insert("broker_id".to_string(), json!(query.broker_id));
-            object.insert("asset_class".to_string(), json!(query.asset_class));
+            object.insert("asset_class".to_string(), json!("shares"));
             object.insert(
                 "reference_source".to_string(),
                 Value::String(market.source().to_string()),

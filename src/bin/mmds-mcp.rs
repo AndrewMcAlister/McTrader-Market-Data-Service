@@ -42,12 +42,11 @@ Latest price for ONE symbol, cached for five minutes, with the previous close an
 percentage move between them. `country_code` (US or AU) is required and names the market: \
 `CBA` is both an ASX and a US listing, so a ticker alone does not say which tape to read. \
 `exchange` (US, AU/ASX, L, TO, HK, F, PA) is an optional second spelling of the same fact and \
-must agree with it; for crypto the country is accepted and ignored, because the market is \
-CRYPTO. `asset_class` picks the provider: \
-shares (default) and indices/commodities/rates/forex go to EODHD then Yahoo; crypto goes \
-to Binance first. The answer names the provider that served it, the market it belongs \
-to and both ages -- `age_seconds` (our cache) and `as_of_age_seconds` (the vendor's \
-observation, which can be older). bid/ask are always null: this vendor has no quote side.";
+must agree with it. Every symbol is treated as a share: there is no asset-class parameter, \
+because the vendor taxonomy behind it was not reliable. The answer names the provider that \
+served it, the market it belongs to and both ages -- `age_seconds` (our cache) and \
+`as_of_age_seconds` (the vendor's observation, which can be older). bid/ask are always null: \
+this vendor has no quote side.";
 
 const GET_PRICES_DESCRIPTION: &str = "\
 Latest prices for a LIST of symbols in one call, cached for five minutes. `country_code` \
@@ -114,8 +113,6 @@ struct GetPriceArgs {
     country_code: String,
     #[serde(default)]
     exchange: Option<String>,
-    #[serde(default)]
-    asset_class: Option<String>,
     /// A cache age in seconds; a caller may only ask for something newer, never staler.
     #[serde(default)]
     max_age_seconds: Option<f64>,
@@ -128,8 +125,6 @@ struct GetPricesArgs {
     country_code: String,
     #[serde(default)]
     exchange: Option<String>,
-    #[serde(default)]
-    asset_class: Option<String>,
     #[serde(default)]
     max_age_seconds: Option<f64>,
 }
@@ -147,8 +142,6 @@ struct GetAtrArgs {
     smoothing: Option<String>,
     #[serde(default)]
     exchange: Option<String>,
-    #[serde(default)]
-    asset_class: Option<String>,
     /// The price the stop is measured from. Supplying it without `multiplier` is a refusal.
     #[serde(default)]
     price: Option<f64>,
@@ -168,8 +161,6 @@ struct GetBarsArgs {
     sessions: i64,
     #[serde(default)]
     exchange: Option<String>,
-    #[serde(default)]
-    asset_class: Option<String>,
     #[serde(default = "default_true")]
     allow_fetch: bool,
 }
@@ -200,7 +191,6 @@ impl MarketDataService {
         let mut query = Vec::new();
         push_string(&mut query, "country_code", Some(args.country_code));
         push_string(&mut query, "exchange", args.exchange);
-        push_string(&mut query, "asset_class", args.asset_class);
         push_number(&mut query, "max_age_seconds", args.max_age_seconds);
         let path = format!("/price/{}", args.symbol);
         CallToolResult::structured(self.proxy.get(&path, &query).await)
@@ -210,7 +200,6 @@ impl MarketDataService {
     async fn get_prices(&self, Parameters(args): Parameters<GetPricesArgs>) -> CallToolResult {
         let mut body = json!({"symbols": args.symbols, "country_code": args.country_code});
         set_string(&mut body, "exchange", args.exchange);
-        set_string(&mut body, "asset_class", args.asset_class);
         set_number(&mut body, "max_age_seconds", args.max_age_seconds);
         CallToolResult::structured(self.proxy.post("/prices", &body).await)
     }
@@ -226,7 +215,6 @@ impl MarketDataService {
         set_string(&mut body, "exchange", args.exchange);
         set_string(&mut body, "method", args.method);
         set_string(&mut body, "smoothing", args.smoothing);
-        set_string(&mut body, "asset_class", args.asset_class);
         set_number(&mut body, "price", args.price);
         set_number(&mut body, "multiplier", args.multiplier);
         CallToolResult::structured(self.proxy.post("/atr", &body).await)
@@ -241,7 +229,6 @@ impl MarketDataService {
             "allow_fetch": args.allow_fetch,
         });
         set_string(&mut body, "exchange", args.exchange);
-        set_string(&mut body, "asset_class", args.asset_class);
         CallToolResult::structured(self.proxy.post("/bars", &body).await)
     }
 
@@ -403,7 +390,7 @@ mod tests {
         let mut query = Vec::new();
         push_string(&mut query, "exchange", Some("US".into()));
         push_string(&mut query, "country_code", Some(String::new()));
-        push_string(&mut query, "asset_class", None);
+        push_string(&mut query, "method", None);
         assert_eq!(query, vec![("exchange", "US".to_string())]);
     }
 

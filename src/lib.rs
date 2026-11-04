@@ -1,3 +1,8 @@
+// The OpenAPI document is one hand-written `json!` literal. Its size, not its depth, is what the
+// macro has to expand, and the default recursion budget of 128 is not enough once every request
+// body carries worked examples.
+#![recursion_limit = "512"]
+
 //! McTrader market data service.
 //!
 //! One library holds every rule the REST API, the daily job, the scheduler, the tools and the

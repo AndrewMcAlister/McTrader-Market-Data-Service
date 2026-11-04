@@ -56,22 +56,21 @@ pub(crate) async fn smoke_api(base: &str) -> ToolResult<()> {
     smoke.verdict()
 }
 
-/// `smoke-providers`: a quote from each provider's territory, then the router's counters.
+/// `smoke-providers`: a few quotes, then the router's counters.
+///
+/// Every symbol is priced as a share now that the request no longer names an asset class, so
+/// this exercises the EODHD -> Yahoo order rather than Binance.
 pub(crate) async fn smoke_providers(base: &str) -> ToolResult<()> {
     let mut smoke = Smoke::new(base)?;
     smoke.price("AAPL").await;
     smoke.price("MSFT").await;
-    smoke.price_class("BTC-USD", "crypto").await;
-    smoke.price_class("ETH-USD", "crypto").await;
-    smoke.price_class("IXIC", "indices").await;
     smoke.prices(&["NVDA", "SPY"]).await;
-    smoke.bars_class(&["BTC-USD"], 15, "crypto").await;
+    smoke.bars(&["AAPL"]).await;
     smoke
         .atr(&json!({
-            "symbols": ["BTC-USD"],
+            "symbols": ["AAPL"],
             "country_code": "US",
-            "period": 14,
-            "asset_class": "crypto"
+            "period": 14
         }))
         .await;
     smoke.router().await;
@@ -118,13 +117,6 @@ impl Smoke {
         }
     }
 
-    async fn price_class(&mut self, symbol: &str, asset_class: &str) {
-        let path = format!("/price/{symbol}?country_code=US&asset_class={asset_class}");
-        if let Some(payload) = self.get(&path, &format!("GET {path}")).await {
-            print_quote(symbol, &payload);
-        }
-    }
-
     async fn prices(&mut self, symbols: &[&str]) {
         let body = json!({"symbols": symbols, "country_code": "US", "exchange": "US"});
         if let Some(payload) = self.post("/prices", &body, "POST /prices").await {
@@ -135,18 +127,6 @@ impl Smoke {
     async fn bars(&mut self, symbols: &[&str]) {
         let body = json!({"symbols": symbols, "sessions": 15, "country_code": "US"});
         if let Some(payload) = self.post("/bars", &body, "POST /bars").await {
-            print_bars(&payload);
-        }
-    }
-
-    async fn bars_class(&mut self, symbols: &[&str], sessions: i64, asset_class: &str) {
-        let body = json!({
-            "symbols": symbols,
-            "sessions": sessions,
-            "country_code": "US",
-            "asset_class": asset_class
-        });
-        if let Some(payload) = self.post("/bars", &body, "POST /bars (crypto)").await {
             print_bars(&payload);
         }
     }

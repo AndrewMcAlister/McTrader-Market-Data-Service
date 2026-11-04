@@ -550,7 +550,7 @@ async fn the_country_code_is_normalised_before_it_reaches_the_product_layer() {
         &state(Some(products.clone())),
         post_json(
             "/prices",
-            json!({"symbols": ["CBA.AU"], "country_code": " au ", "asset_class": "shares"}),
+            json!({"symbols": ["CBA.AU"], "country_code": " au "}),
         ),
     )
     .await;
@@ -558,7 +558,7 @@ async fn the_country_code_is_normalised_before_it_reaches_the_product_layer() {
     assert_eq!(reply.body["exchange"], "US");
     assert_eq!(
         products.calls(),
-        vec!["prices:[\"CBA.AU\"]:None:None:Some(\"shares\"):Some(\"AU\")"]
+        vec!["prices:[\"CBA.AU\"]:None:None:None:Some(\"AU\")"]
     );
 }
 
@@ -616,14 +616,14 @@ async fn the_get_price_query_reaches_the_product_layer() {
     let products = FakeProducts::ok();
     let reply = call(
         &state(Some(products.clone())),
-        get("/price/tsla?exchange=US&max_age_seconds=60&asset_class=shares&country_code=us"),
+        get("/price/tsla?exchange=US&max_age_seconds=60&country_code=us"),
     )
     .await;
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(reply.body["symbol"], "tsla");
     assert_eq!(
         products.calls(),
-        vec!["price:tsla:Some(\"US\"):Some(60.0):Some(\"shares\"):Some(\"US\")"]
+        vec!["price:tsla:Some(\"US\"):Some(60.0):None:Some(\"US\")"]
     );
 }
 
@@ -662,15 +662,8 @@ async fn a_malformed_clock_time_is_a_400_with_the_parsers_sentence() {
 }
 
 #[tokio::test]
-async fn an_unknown_asset_class_is_a_404_naming_the_class() {
-    let reply = call(&state(None), get("/market/session?asset_class=wibble")).await;
-    assert_eq!(reply.status, StatusCode::NOT_FOUND);
-    assert_eq!(reply.body["error"], "unknown asset class 'wibble'");
-}
-
-#[tokio::test]
 async fn the_market_session_names_its_reference_source() {
-    let reply = call(&state(None), get("/market/session?asset_class=shares")).await;
+    let reply = call(&state(None), get("/market/session")).await;
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(reply.body["broker_id"], 1);
     assert_eq!(reply.body["asset_class"], "shares");

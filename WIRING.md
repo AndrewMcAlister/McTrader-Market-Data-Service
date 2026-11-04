@@ -67,7 +67,7 @@ the gap is visible rather than absorbed — but visible is not the same as corre
 
 ## 4. The four endpoints
 
-### `GET /price/{symbol}?country_code=US&asset_class=&max_age_seconds=`
+### `GET /price/{symbol}?country_code=US&exchange=&max_age_seconds=`
 
 ```json
 { "symbol": "AAPL", "exchange": "US", "price": 343.83, "previous_close": 347.10, "change_pct": -0.9421,
@@ -88,7 +88,7 @@ country is refused with a 422 rather than answered from the US tape. A contradic
 ### `POST /prices`
 
 ```json
-{ "symbols": ["AAPL","MSFT"], "country_code": "US", "asset_class": null, "max_age_seconds": 300 }
+{ "symbols": ["AAPL","MSFT"], "country_code": "US", "max_age_seconds": 300 }
 ```
 
 Answers with `quotes`, `exchange`, `fetched`, `missing`, `deferred`, `route`, `complete`. One
@@ -103,7 +103,7 @@ cost 6. Neither caller has to know.
 
 ```json
 { "symbols": ["AAPL"], "period": 14, "method": "tr", "smoothing": "simple",
-  "country_code": "US", "asset_class": null,
+  "country_code": "US",
   "price": 343.83, "multiplier": 1.0, "direction": "long" }
 ```
 
@@ -160,8 +160,8 @@ seconds returns immediately instead of hanging. Treat it as retryable rather tha
    market, ~2 MB). If McTrader only needs the top N movers, sort locally rather than asking for a
    narrower list — a narrower list may drop below the 100-symbol break-even and become *more*
    expensive.
-5. **Crypto uses `asset_class: "crypto"`.** The country is still required by the request shape
-   but is meaningless there and is ignored.
+5. **There is no asset-class field.** The vendor taxonomy was not reliable, so every symbol is
+   priced as a share; crypto and indices are not selectable over this API.
 6. **A country code is mandatory.** `CBA`, `BHP`, `BXB` are ASX tickers *and* US ones. Pass
    `country_code` (`US` or `AU`) on every symbol-bearing call; omitting it is a 422, not a US
    default. A suffix (`CBA.AU`) corroborates the country but does not replace it. A

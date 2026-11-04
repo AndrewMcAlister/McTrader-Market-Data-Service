@@ -41,7 +41,9 @@ pub async fn get_price(
                 &symbol,
                 query.exchange.as_deref(),
                 query.max_age_seconds,
-                query.asset_class.as_deref(),
+                // The request no longer names an asset class; every symbol is treated as a
+                // share, the class the vendor taxonomy answered reliably for.
+                None,
                 Some(country.key),
             )
             .await
@@ -76,7 +78,8 @@ pub async fn post_prices(
                 &body.symbols,
                 body.exchange.as_deref(),
                 body.max_age_seconds,
-                body.asset_class.as_deref(),
+                // No asset class is a request field any more; see `get_price`.
+                None,
                 Some(country.key),
             )
             .await
@@ -117,7 +120,8 @@ pub async fn post_atr(
                 multiplier: body.multiplier,
                 direction: body.direction.as_deref().unwrap_or("long"),
                 allow_fetch: true,
-                asset_class: body.asset_class.as_deref(),
+                // No asset class is a request field any more; see `get_price`.
+                asset_class: None,
                 country_code: Some(country.key),
             })
             .await
@@ -156,7 +160,8 @@ pub async fn post_bars(
                 body.sessions,
                 body.exchange.as_deref(),
                 body.allow_fetch,
-                body.asset_class.as_deref(),
+                // No asset class is a request field any more; see `get_price`.
+                None,
                 Some(country.key),
             )
             .await

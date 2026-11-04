@@ -1,4 +1,4 @@
-//! Operator commands: the ten `tools/*.py` scripts, as one subcommand tree.
+//! Operator commands: the source `tools/*.py` scripts, as one subcommand tree.
 //!
 //! # Why one binary
 //!
@@ -73,9 +73,6 @@ enum Command {
         source: Option<String>,
     },
 
-    /// Force a cache bypass to check the Yahoo previous-close fix on indices.
-    CheckIndexQuote,
-
     /// Start the MCP server and list and call all five of its tools.
     CheckMcp,
 
@@ -111,7 +108,6 @@ async fn dispatch(command: Command, base_url: &str) -> ToolResult<()> {
         Command::BenchUpsert => operator::bench_upsert().await,
         Command::CleanupSessions { cutoff } => operator::cleanup_sessions(cutoff).await,
         Command::CopyExchanges { source } => operator::copy_exchanges(source).await,
-        Command::CheckIndexQuote => probes::check_index_quote(base_url).await,
         Command::CheckMcp => mcp::check_mcp(base_url).await,
         Command::ProbeBulkRoute => probes::probe_bulk_route(base_url).await,
         Command::ProbeResponsiveness => probes::probe_responsiveness(base_url).await,

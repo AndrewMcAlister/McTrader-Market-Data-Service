@@ -98,9 +98,12 @@ does not say which market it means has no safe answer. A missing country is a 42
 silent US default; an unknown one is a 422 that names the countries the service serves.
 `exchange` (`US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`) is an optional second spelling of
 the same fact and must agree with the country; a contradiction is a 400 (`exchange-conflict`),
-because serving either market silently is how two exchanges' prices get mixed. For
-`asset_class: "crypto"` the country is accepted and ignored: the market is `CRYPTO`.
+because serving either market silently is how two exchanges' prices get mixed.
 Every answer states the market it used.
+
+There is no asset-class parameter. The vendor taxonomy proved unreliable, so every symbol is
+priced as a share and takes the EODHD → Yahoo route; crypto and indices are not selectable
+through this API.
 
 ### `GET /price/{symbol}`
 
@@ -239,7 +242,7 @@ When `MDS_ADMIN_TOKEN` is configured, `POST /secrets/eodhd`, `POST /refresh` and
 
 ---
 
-## Providers: three sources, routed per asset class
+## Providers: three sources, ordered per asset class
 
 ```
                     ┌── EODHD    (metered, adjusted, whole-market feeds)
@@ -249,13 +252,15 @@ POST /bars
 GET /price/{symbol}
 ```
 
-The order is per asset class, not one global list:
+The router's order is per asset class, not one global list. The HTTP and MCP surfaces no longer
+take an asset class — the vendor taxonomy behind it was not reliable — so every request is
+priced as `shares` and takes the EODHD → Yahoo order:
 
-| `asset_class` | order | why |
+| Internal asset class | order | why |
 |---|---|---|
-| `shares` (default) | EODHD → Yahoo | EODHD is adjusted and consistent; Yahoo is the free fallback |
+| `shares` (every HTTP request) | EODHD → Yahoo | EODHD is adjusted and consistent; Yahoo is the free fallback |
 | `indices` / `commodities` / `rates` / `forex` | EODHD → Yahoo | EODHD renders these as `.INDX` / US ETF proxies; Yahoo has real `^IXIC`, `GC=F` |
-| `crypto` | **Binance** → EODHD → Yahoo | the pair is quoted natively rather than rendered as `BTC.CC` |
+| `crypto` (library callers only) | **Binance** → EODHD → Yahoo | the pair is quoted natively rather than rendered as `BTC.CC` |
 
 A provider that cannot serve an asset class is never asked. Every quote and bar carries the
 `provider` that answered — **that field is load-bearing**, not decoration: this estate has
@@ -1062,15 +1067,14 @@ implementation reported `WinVaultKeyring`, and the Rust store reports its own na
 
 #### No key does not stop the service
 
-EODHD is left out of the router and Yahoo/Binance carry on, so crypto, indices and FX keep answering.
+EODHD is left out of the router and Yahoo carries on, so share prices keep answering.
 A share falls through to Yahoo — and the response says `provider: "yahoo"`, so the tape change is
 declared rather than hidden. Verified with the key removed:
 
 | Call | With no key |
 |---|---|
-| `/price/BTC-USD?asset_class=crypto&country_code=US` | `provider=binance` |
-| `/price/IXIC?asset_class=indices&country_code=US` | `provider=yahoo` |
 | `/price/AAPL?country_code=US` | `provider=yahoo` — degraded, and declared |
+| `/price/CBA?country_code=AU` | `provider=yahoo` |
 | `/prices` above 100 symbols | per-symbol, because the bulk feed is EODHD-only |
 
 #### Protecting the write

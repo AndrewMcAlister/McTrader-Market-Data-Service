@@ -45,9 +45,12 @@ The third still names the country: the suffix corroborates it, it does not repla
 
 The market that was used comes back on every answer (`exchange` on `/prices` and `/atr`,
 per-symbol on `/bars`, and per-quote on `/price`), so a caller never has to assume which
-instrument a number belongs to. Crypto has no market: `asset_class: "crypto"` is cached under
-`CRYPTO`; the country is still required by the request shape but is ignored, and a stated
-`exchange` is ignored with it.
+instrument a number belongs to.
+
+**There is no asset-class request field.** The vendor taxonomy behind it was not reliable, so
+every symbol is treated as a share and takes the EODHD → Yahoo route. Crypto, indices,
+commodities, rates and forex are not selectable over this API; a crypto pair sent as a share is
+priced from the share feeds, which will usually answer `unpriced`.
 
 ---
 
@@ -60,8 +63,7 @@ Latest price for one symbol.
 | Name | Type | Default | Notes |
 |---|---|---|---|
 | `country_code` | string | **required** | `US` or `AU`. The market the ticker is in — `CBA` is both an ASX and a US listing. Missing or unknown is a 422 |
-| `exchange` | string | none | Optional second spelling of the same fact: `US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`. Must agree with `country_code`. Ignored for crypto |
-| `asset_class` | string | `shares` | `shares`, `crypto`, `indices`, `commodities`, `rates`, `forex`. Chooses the provider. |
+| `exchange` | string | none | Optional second spelling of the same fact: `US`/`NYSE`/`NASDAQ`/`AMEX`/`NYSEARCA`, `AU`/`ASX`/`AX`/`AUS`. Must agree with `country_code` |
 | `max_age_seconds` | float | `300` | **Lowers** the cache window; cannot raise it. |
 
 `country_code` is required: `GET /price/AAPL?country_code=US` is the shape. `exchange` is
@@ -112,7 +114,7 @@ separate endpoint.
 **Request**
 
 ```json
-{ "symbols": ["AAPL", "MSFT"], "country_code": "US", "asset_class": null, "max_age_seconds": 300 }
+{ "symbols": ["AAPL", "MSFT"], "country_code": "US", "max_age_seconds": 300 }
 ```
 
 `country_code` is required; `exchange` is an optional spelling of the same fact and must agree
@@ -169,7 +171,6 @@ else computed from daily bars.
   "method": "tr",
   "smoothing": "simple",
   "country_code": "US",
-  "asset_class": null,
   "price": 343.83,
   "multiplier": 1.0,
   "direction": "long"
@@ -238,7 +239,7 @@ Completed daily bars.
 **Request**
 
 ```json
-{ "symbols": ["AAPL"], "sessions": 15, "country_code": "US", "asset_class": null, "allow_fetch": true }
+{ "symbols": ["AAPL"], "sessions": 15, "country_code": "US", "allow_fetch": true }
 ```
 
 **200 response**
@@ -373,11 +374,14 @@ transport failure, where the request never landed, is free and unrecorded.
 
 ## 6. Provider routing — read this before interpreting `provider`
 
-| `asset_class` | Order |
+The router still orders providers per asset class internally, but **no request field selects a
+class**: every symbol-bearing request is treated as `shares`.
+
+| Internal asset class | Order |
 |---|---|
-| `shares` (default) | EODHD → Yahoo |
+| `shares` (every HTTP request) | EODHD → Yahoo |
 | `indices`, `commodities`, `rates`, `forex` | EODHD → Yahoo |
-| `crypto` | **Binance** → EODHD → Yahoo |
+| `crypto` (library callers only) | **Binance** → EODHD → Yahoo |
 
 Every quote and bar declares the provider that answered. **Two calls for the same symbol can be
 answered by different providers.** That is allowed, but it must be visible: never compute a change
@@ -398,9 +402,9 @@ A provider that cannot serve an asset class is never asked — Binance is never 
 6. **Symbol format:** every request names its market with `country_code` (`US` or `AU`); the
    symbol may be bare (`AAPL`) or already-suffixed (`AAPL.US`). A suffix must agree with the
    stated country (`CBA.AU` with `country_code: "AU"` is ASX data; with `US` it is
-   `400 exchange-conflict`), and a missing country is a `422` rather than a US default. Crypto
-   pairs are bare or dashed (`BTC-USD`); the country is required but ignored for crypto.
-7. **Crypto needs `asset_class: "crypto"`**, or it is treated as a share and priced from the wrong feed.
+   `400 exchange-conflict`), and a missing country is a `422` rather than a US default.
+7. **There is no asset-class field.** Every symbol is priced as a share; a crypto pair or an index
+   sent to a symbol endpoint will usually come back `unpriced` rather than from the right tape.
 8. **Whole-market responses are large** (~12,700 rows, ~2 MB). If you only need the top movers, sort
    locally rather than shortening the list — a shorter list can drop below the 100-symbol break-even
    and become *more* expensive.
@@ -418,9 +422,9 @@ import requests
 
 BASE = "http://127.0.0.1:8003"
 
-def price(symbol, country_code, asset_class="shares"):
+def price(symbol, country_code):
     r = requests.get(f"{BASE}/price/{symbol}",
-                     params={"country_code": country_code, "asset_class": asset_class},
+                     params={"country_code": country_code},
                      timeout=30)
     r.raise_for_status()
     return r.json()

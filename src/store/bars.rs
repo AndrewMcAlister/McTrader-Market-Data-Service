@@ -108,7 +108,7 @@ pub trait DailyBarRepository: Send + Sync {
         limit: i64,
     ) -> Result<Vec<SessionSymbolCount>, StoreError>;
 
-    /// Every series holding at least `minimum` sessions, ordered by venue then symbol.
+    /// Every series holding at least `minimum` sessions, ordered by exchange then symbol.
     ///
     /// This is the indicator rebuild's work list. It is a store query rather than a scan of
     /// `DailySnapshot` in the job because the grouping and the count belong with the table.
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn the_merge_keeps_an_existing_raw_close_and_the_venue_key() {
+    fn the_merge_keeps_an_existing_raw_close_and_the_exchange_key() {
         assert!(MERGE_DAILY_FROM_STAGE.contains("USING #stage AS source"));
         assert!(MERGE_DAILY_FROM_STAGE.contains("target.Exchange = source.Exchange"));
         assert!(MERGE_DAILY_FROM_STAGE.contains("target.SnapshotDate = source.SnapshotDate"));
@@ -441,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn the_indicator_work_list_counts_sessions_per_venue() {
+    fn the_indicator_work_list_counts_sessions_per_exchange() {
         assert!(SYMBOLS_WITH_MIN_SESSIONS_SQL.contains("GROUP BY SymbolCode, Exchange"));
         assert!(SYMBOLS_WITH_MIN_SESSIONS_SQL.contains("HAVING COUNT(*) >= @P1"));
         assert!(SYMBOLS_WITH_MIN_SESSIONS_SQL.contains("ORDER BY Exchange, SymbolCode"));

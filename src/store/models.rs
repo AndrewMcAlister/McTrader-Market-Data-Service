@@ -16,7 +16,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedPrice {
     pub symbol: String,
-    pub venue: String,
+    pub exchange: String,
     pub price: Option<f64>,
     pub bid: Option<f64>,
     pub ask: Option<f64>,
@@ -27,12 +27,12 @@ pub struct CachedPrice {
     pub provider: Option<String>,
 }
 
-/// A price row to upsert. `venue` is optional only so the store can refuse it explicitly:
-/// the source service required a venue on write rather than assuming US.
+/// A price row to upsert. `exchange` is optional only so the store can refuse it explicitly:
+/// the source service required an exchange on write rather than assuming US.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PriceRow {
     pub symbol: String,
-    pub venue: Option<String>,
+    pub exchange: Option<String>,
     pub price: f64,
     pub bid: Option<f64>,
     pub ask: Option<f64>,
@@ -58,7 +58,7 @@ pub struct StoredBar {
     pub raw_close: Option<f64>,
 }
 
-/// One daily series: a ticker at one venue.
+/// One daily series: a ticker at one exchange.
 ///
 /// The pair is the cache key for bars and ATR, because `CBA` at the ASX and `CBA` in New York
 /// are different instruments with different histories.
@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn a_series_key_is_the_symbol_and_the_venue_together() {
+    fn a_series_key_is_the_symbol_and_the_exchange_together() {
         let us = SeriesKey {
             symbol: "CBA".into(),
             exchange: "US".into(),

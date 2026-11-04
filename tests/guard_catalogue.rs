@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn prose_lines_are_not_locations() {
-        assert!(parse_location("## G-01 · Venue resolution").is_none());
+        assert!(parse_location("## G-01 · Exchange resolution").is_none());
         assert!(parse_location("- **Config:** none").is_none());
     }
 }

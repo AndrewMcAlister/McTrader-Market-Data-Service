@@ -41,7 +41,7 @@ const GET_PRICE_DESCRIPTION: &str = "\
 Latest price for ONE symbol, cached for five minutes, with the previous close and the \
 percentage move between them. `country_code` (US or AU) is required and names the market: \
 `CBA` is both an ASX and a US listing, so a ticker alone does not say which tape to read. \
-`venue` (US, AU/ASX, L, TO, HK, F, PA) is an optional second spelling of the same fact and \
+`exchange` (US, AU/ASX, L, TO, HK, F, PA) is an optional second spelling of the same fact and \
 must agree with it; for crypto the country is accepted and ignored, because the market is \
 CRYPTO. `asset_class` picks the provider: \
 shares (default) and indices/commodities/rates/forex go to EODHD then Yahoo; crypto goes \
@@ -53,7 +53,7 @@ const GET_PRICES_DESCRIPTION: &str = "\
 Latest prices for a LIST of symbols in one call, cached for five minutes. `country_code` \
 (US or AU) is required and names the market, because a ticker is not unique across them \
 (`CBA` is an ASX listing and a US one); one request is one market, and the answer echoes \
-`venue`. `venue` is an optional second spelling that must agree with the country. The \
+`exchange`. `exchange` is an optional second spelling that must agree with the country. The \
 service picks the cheaper route itself from the list length, because the tariff breaks \
 even at 100 symbols (1 unit per symbol against 100 flat for the whole market) -- so a \
 6-symbol request and a 2,800-symbol request are both priced correctly without the caller \
@@ -64,7 +64,7 @@ const GET_ATR_DESCRIPTION: &str = "\
 Average True Range for one or more symbols, from the precomputed IndicatorCache, so it \
 costs no vendor call when it has been calculated for the session. `country_code` (US or \
 AU) is required and names the market -- the cache is keyed by it, so an ASX `CBA` and a US \
-`CBA` have separate ATRs and neither is served for the other; `venue` (US, AU/ASX, L, TO, \
+`CBA` have separate ATRs and neither is served for the other; `exchange` (US, AU/ASX, L, TO, \
 HK, F, PA) is an optional second spelling that must agree. TRUE RANGE IS \
 GAP-INCLUSIVE: max(High-Low, |High-PrevClose|, |Low-PrevClose|), averaged over the last N \
 bars -- the standard method, and what every existing implementation in the estate uses. \
@@ -77,11 +77,11 @@ const GET_BARS_DESCRIPTION: &str = "\
 Completed daily bars for one or more symbols, from DailySnapshot, with the vendor called \
 only when the cache is short. `country_code` (US or AU) is required and names the market, \
 and it chooses the series: `CBA` at the ASX and `CBA` in New York are \
-different instruments, so a venue with a short series answers `short_history` rather than \
-borrowing the other one's bars; `venue` (US, AU/ASX, L, TO, HK, F, PA) is an optional \
+different instruments, so an exchange with a short series answers `short_history` rather than \
+borrowing the other one's bars; `exchange` (US, AU/ASX, L, TO, HK, F, PA) is an optional \
 second spelling that must agree. The session still in progress is always excluded: \
 a partial session has a partial range and using it shrinks a stop exactly when the morning \
-is quiet. Each answer carries `as_of_session`, `venue`, `adjusted` (whether the series is \
+is quiet. Each answer carries `as_of_session`, `exchange`, `adjusted` (whether the series is \
 split-adjusted) and `provider`. `allow_fetch=false` answers only from the cache and never \
 calls a vendor.";
 
@@ -113,7 +113,7 @@ struct GetPriceArgs {
     /// Required: `US` or `AU`. A ticker alone does not name a market.
     country_code: String,
     #[serde(default)]
-    venue: Option<String>,
+    exchange: Option<String>,
     #[serde(default)]
     asset_class: Option<String>,
     /// A cache age in seconds; a caller may only ask for something newer, never staler.
@@ -127,7 +127,7 @@ struct GetPricesArgs {
     /// Required: `US` or `AU`. A ticker alone does not name a market.
     country_code: String,
     #[serde(default)]
-    venue: Option<String>,
+    exchange: Option<String>,
     #[serde(default)]
     asset_class: Option<String>,
     #[serde(default)]
@@ -146,7 +146,7 @@ struct GetAtrArgs {
     #[serde(default)]
     smoothing: Option<String>,
     #[serde(default)]
-    venue: Option<String>,
+    exchange: Option<String>,
     #[serde(default)]
     asset_class: Option<String>,
     /// The price the stop is measured from. Supplying it without `multiplier` is a refusal.
@@ -167,7 +167,7 @@ struct GetBarsArgs {
     #[serde(default = "default_sessions")]
     sessions: i64,
     #[serde(default)]
-    venue: Option<String>,
+    exchange: Option<String>,
     #[serde(default)]
     asset_class: Option<String>,
     #[serde(default = "default_true")]
@@ -199,7 +199,7 @@ impl MarketDataService {
     async fn get_price(&self, Parameters(args): Parameters<GetPriceArgs>) -> CallToolResult {
         let mut query = Vec::new();
         push_string(&mut query, "country_code", Some(args.country_code));
-        push_string(&mut query, "venue", args.venue);
+        push_string(&mut query, "exchange", args.exchange);
         push_string(&mut query, "asset_class", args.asset_class);
         push_number(&mut query, "max_age_seconds", args.max_age_seconds);
         let path = format!("/price/{}", args.symbol);
@@ -209,7 +209,7 @@ impl MarketDataService {
     #[tool(name = "get_prices", description = GET_PRICES_DESCRIPTION)]
     async fn get_prices(&self, Parameters(args): Parameters<GetPricesArgs>) -> CallToolResult {
         let mut body = json!({"symbols": args.symbols, "country_code": args.country_code});
-        set_string(&mut body, "venue", args.venue);
+        set_string(&mut body, "exchange", args.exchange);
         set_string(&mut body, "asset_class", args.asset_class);
         set_number(&mut body, "max_age_seconds", args.max_age_seconds);
         CallToolResult::structured(self.proxy.post("/prices", &body).await)
@@ -223,7 +223,7 @@ impl MarketDataService {
             "period": args.period,
             "direction": args.direction,
         });
-        set_string(&mut body, "venue", args.venue);
+        set_string(&mut body, "exchange", args.exchange);
         set_string(&mut body, "method", args.method);
         set_string(&mut body, "smoothing", args.smoothing);
         set_string(&mut body, "asset_class", args.asset_class);
@@ -240,7 +240,7 @@ impl MarketDataService {
             "sessions": args.sessions,
             "allow_fetch": args.allow_fetch,
         });
-        set_string(&mut body, "venue", args.venue);
+        set_string(&mut body, "exchange", args.exchange);
         set_string(&mut body, "asset_class", args.asset_class);
         CallToolResult::structured(self.proxy.post("/bars", &body).await)
     }
@@ -401,10 +401,10 @@ mod tests {
     #[test]
     fn absent_query_values_are_omitted_and_empty_strings_count_as_absent() {
         let mut query = Vec::new();
-        push_string(&mut query, "venue", Some("US".into()));
+        push_string(&mut query, "exchange", Some("US".into()));
         push_string(&mut query, "country_code", Some(String::new()));
         push_string(&mut query, "asset_class", None);
-        assert_eq!(query, vec![("venue", "US".to_string())]);
+        assert_eq!(query, vec![("exchange", "US".to_string())]);
     }
 
     #[test]
@@ -418,12 +418,12 @@ mod tests {
     #[test]
     fn a_body_gains_only_the_fields_the_caller_stated() {
         let mut body = json!({"symbols": ["AAPL"]});
-        set_string(&mut body, "venue", Some("US".into()));
+        set_string(&mut body, "exchange", Some("US".into()));
         set_string(&mut body, "method", None);
         set_number(&mut body, "price", Some(231.4));
         assert_eq!(
             body,
-            json!({"symbols": ["AAPL"], "venue": "US", "price": 231.4})
+            json!({"symbols": ["AAPL"], "exchange": "US", "price": 231.4})
         );
     }
 

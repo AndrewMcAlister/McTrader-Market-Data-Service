@@ -41,7 +41,7 @@ McTrader      ─┘        │
 src/
   config.rs              settings, environment parsing, key resolution
   error.rs               typed errors and their HTTP rendering
-  domain/                pure rules: ATR, sessions, venues, availability, symbols, asset classes
+  domain/                pure rules: ATR, sessions, exchanges, availability, symbols, asset classes
   clock.rs               dual market clock (dbo.Exchanges + data/clock.json fallback)
   store/                 tiberius pool, schema, repositories, SQL builders
   providers/             EODHD, Yahoo, Binance and the per-asset-class router
@@ -96,9 +96,9 @@ Every endpoint that takes a symbol also **requires** `country_code` — `US` or 
 ticker is not unique across exchanges (`CBA` is an ASX listing *and* a US one) and a request that
 does not say which market it means has no safe answer. A missing country is a 422, never a
 silent US default; an unknown one is a 422 that names the countries the service serves.
-`venue` (`US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`) is an optional second spelling of
-the same fact and must agree with the country; a contradiction is a 400 (`venue-conflict`),
-because serving either market silently is how two venues' prices get mixed. For
+`exchange` (`US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`) is an optional second spelling of
+the same fact and must agree with the country; a contradiction is a 400 (`exchange-conflict`),
+because serving either market silently is how two exchanges' prices get mixed. For
 `asset_class: "crypto"` the country is accepted and ignored: the market is `CRYPTO`.
 Every answer states the market it used.
 
@@ -110,7 +110,7 @@ GET /price/CBA?country_code=AU        # a suffix must agree: /price/CBA.AU?count
 ```
 ```json
 {
-  "symbol": "AAPL", "venue": "US", "price": 231.4, "previous_close": 229.1, "change_pct": 1.004,
+  "symbol": "AAPL", "exchange": "US", "price": 231.4, "previous_close": 229.1, "change_pct": 1.004,
   "bid": null, "ask": null,
   "provider": "eodhd", "fetched_at": "2026-10-29T02:41:07", "age_seconds": 0.4,
   "as_of": "2026-10-29T02:40:31", "as_of_age_seconds": 36.2
@@ -132,7 +132,7 @@ quote side.
 ```json
 {
   "quotes": { "AAPL": { "...": "..." }, "MSFT": { "...": "..." } },
-  "venue": "US",
+  "exchange": "US",
   "fetched": ["AAPL", "MSFT"], "missing": [], "deferred": [],
   "complete": true, "route": "per_symbol", "requested": 2, "count": 2
 }
@@ -168,7 +168,7 @@ minute, and caching the failure would hide a recovery.
       "source": "indicator_cache", "reason": null, "stop_level": 225.58
     }
   },
-  "venue": "US",
+  "exchange": "US",
   "period": 14, "method": "tr", "smoothing": "simple", "complete": true
 }
 ```
@@ -183,9 +183,9 @@ definition cannot be reproduced.
   multiplier is never defaulted: the four books use 1.0, 1.0, 2.0 and 3.0, so a default would
   silently impose one book's risk on another's.
 
-**The ATR is one venue's ATR.** `IndicatorCache` is keyed by `(symbol, exchange)`, so an ASX
+**The ATR is one exchange's ATR.** `IndicatorCache` is keyed by `(symbol, exchange)`, so an ASX
 `CBA` is never served the US `CBA`'s volatility — which, with a symbol-only key, is exactly
-what would have happened. `country_code` is what picks the series, and `venue` is echoed at the
+what would have happened. `country_code` is what picks the series, and `exchange` is echoed at the
 top of the response.
 
 ### `POST /bars`
@@ -197,7 +197,7 @@ top of the response.
 {
   "bars": {
     "AAPL": {
-      "symbol": "AAPL", "venue": "US",
+      "symbol": "AAPL", "exchange": "US",
       "as_of_session": "2026-10-14", "sessions": 15, "adjusted": true,
       "provider": "cache", "source": "cache",
       "rows": [ { "d": "2026-09-24", "o": 250.1, "h": 254.9, "l": 249.2,
@@ -210,8 +210,8 @@ top of the response.
 
 `country_code` selects which series is read, because `DailySnapshot` is keyed by
 exchange: `AAPL` at `AU` is a different instrument from `AAPL` at `US`, not a misspelling to
-fall back from. A venue whose series is short answers `short_history`; it does not borrow the
-other venue's bars. A suffixed symbol (`CBA.AU`) must agree with the country that came with it.
+fall back from. An exchange whose series is short answers `short_history`; it does not borrow the
+other exchange's bars. A suffixed symbol (`CBA.AU`) must agree with the country that came with it.
 
 The session in progress is **dropped here**, in the service, not by each caller — a partial
 session has a partial range and using it shrinks a stop exactly when the morning is quiet.
@@ -377,9 +377,9 @@ verbatim with the Python reference — a database prepared for one is prepared f
 
 | Table | Grain | Holds |
 |---|---|---|
-| `SymbolPriceCache` | symbol × venue | latest known price, overwritten in place |
-| `DailySnapshot` | symbol × exchange × session | daily OHLCV, appended once per session per venue |
-| `IndicatorCache` | symbol × exchange | precomputed ATR 14/20/22/26/50 for one venue's series |
+| `SymbolPriceCache` | symbol × exchange | latest known price, overwritten in place |
+| `DailySnapshot` | symbol × exchange × session | daily OHLCV, appended once per session per exchange |
+| `IndicatorCache` | symbol × exchange | precomputed ATR 14/20/22/26/50 for one exchange's series |
 | `Exchanges` | one row per exchange | `Code`, `Timezone`, `Opens`, `Closes` in the exchange's own local time; copied from `McTrader_Live.dbo.Exchanges` by `mmds-tool copy-exchanges` and read by the market clock |
 
 The market clock reads the exchange hours from `dbo.Exchanges`, not from
@@ -400,21 +400,23 @@ table when this is the source in use, and `data/clock.json` when it has fallen b
 Notes that are load-bearing:
 
 - **The bar tables are keyed by exchange as well as symbol.** A bare ticker is not unique —
-  `CBA` is an ASX listing and a US one — and a symbol-only key lets one venue's row overwrite
+  `CBA` is an ASX listing and a US one — and a symbol-only key lets one exchange's row overwrite
   the other's without a word. `DailySnapshot` is `(SymbolCode, Exchange, SnapshotDate)` and
-  `IndicatorCache` is `(SymbolCode, Exchange)`, so every read and write states the venue.
-  `SymbolPriceCache` calls the same code `Venue` because it got there first; both columns hold
-  the vendor's exchange code (`US`, `AU`, ...).
-- **A write always states its venue.** The three columns are `NOT NULL` and carry no default,
+  `IndicatorCache` is `(SymbolCode, Exchange)`, so every read and write states the exchange.
+  `SymbolPriceCache` carries the same column as `Exchange`; on a database created before this
+  change it was called `Venue`, and `sql/001_schema.sql` renames it in place (rows and key
+  preserved) the first time the service starts.
+- **A write always states its exchange.** The three columns are `NOT NULL` and carry no default,
   at either layer: the store raises before it builds a row, and SQL Server refuses one that
-  arrives without a value. A row is never filed as US by omission. The only place US is
-  assumed is a request that does not name a venue, which is the API's documented default.
+  arrives without a value. A row is never filed as US by omission. No API request can reach the
+  resolver's US fallback: `country_code` is required, so only an internal caller that states no
+  market at all gets it.
 - **Rows written before 2026-11-01 were backfilled** from the price cache: US, unless that
   symbol was known on the ASX and nowhere else. That reassigned 18,363 rows that had been AU
   all along and were indistinguishable from US ones.
-- **The ATR cache was cleared once**, when the venue key was added: every row in it had been
-  computed under a symbol-only key, so it was either labelled with the wrong venue or had both
-  venues' bars mixed into one number. It refills from the next daily refresh, or from `/atr`
+- **The ATR cache was cleared once**, when the exchange key was added: every row in it had been
+  computed under a symbol-only key, so it was either labelled with the wrong exchange or had both
+  exchanges' bars mixed into one number. It refills from the next daily refresh, or from `/atr`
   on demand.
 - **`IndicatorCache` carries 22 and 26 as well as the specified 14/20/50.** 22 is McTrader's
   Chandelier window and its preferred stop ATR; 26 is PortfolioAdvisor's MACD-V divisor. 20
@@ -444,7 +446,7 @@ Notes that are load-bearing:
 
 Three indexes carry the reads: `PK_DailySnapshot` (SymbolCode, Exchange, SnapshotDate) for one
 symbol's series, `PK_IndicatorCache` (SymbolCode, Exchange) and `PK_SymbolPriceCache`
-(SymbolCode, Venue). The one gap was the *session-wide* read — every symbol's bar for one date,
+(SymbolCode, Exchange). The one gap was the *session-wide* read — every symbol's bar for one date,
 which is what movers and the close-to-close comparisons do. `sql/002_indexes.sql` replaces
 `IX_DailySnapshot_Date` with `IX_DailySnapshot_Session (SnapshotDate, Exchange) INCLUDE (Open,
 High, Low, Close, Volume, IsAdjusted)`. Measured before that change: 11,986 scans of the date
@@ -631,9 +633,9 @@ spend 100 units writing the same rows.
 
 ### It reports whether it produced the right session
 
-`expected_session` comes from the session rules — the venue's own clock, close plus a
+`expected_session` comes from the session rules — the exchange's own clock, close plus a
 three-hour settlement margin. `behind_expected` is true when the vendor returned an older session than
-the venue says should exist, which is how a vendor lag or a holiday becomes visible instead of silent.
+the exchange says should exist, which is how a vendor lag or a holiday becomes visible instead of silent.
 For scale: at 20:30 Sydney the answer is `US: 2026-10-28`, `AU: 2026-10-29` — the ASX has settled and
 the US has not.
 
@@ -762,7 +764,7 @@ All by environment variable; defaults are the safe ones.
 | `MDS_PORT` | `8003` | port |
 | `MDS_HOST` | `127.0.0.1` | bind address — localhost only |
 | `MDS_CLOCK_USER_TIMEZONE` | `Australia/Sydney` | timezone for a bare `HH:MM` clock reference |
-| `MDS_SCHEDULE_OFFSET_MINUTES` | `45` | collect at venue open + this many minutes |
+| `MDS_SCHEDULE_OFFSET_MINUTES` | `45` | collect at exchange open + this many minutes |
 | `MDS_SCHEDULE_RETRY_MINUTES` | `15` | one retry at +15 min, then stop |
 | `MDS_SCHEDULE_ENABLED` | `1` | `0` stops automatic collection |
 | `MDS_ADMIN_TOKEN` | *(unset)* | when set, required by privileged endpoints |
@@ -957,20 +959,20 @@ wedged child that will not serve HTTP — after which NSSM's restart is usually 
 
 ### Collection is a schedule inside the service, not a task
 
-The service collects on its own clock: at each venue's **open + 45 minutes**, with **one retry
+The service collects on its own clock: at each exchange's **open + 45 minutes**, with **one retry
 fifteen minutes later** and nothing after that.
 
-| market | venue opens | fires at | UTC |
+| market | exchange opens | fires at | UTC |
 |---|---|---|---|
 | US | 09:30 New York | 10:15 New York | 14:15Z on EDT, 15:15Z on EST |
 | AU | 10:00 Sydney | 10:45 Sydney | 23:45Z the previous UTC day |
 
 Both times come from the market clock, so a daylight-saving change moves the collection with the
 session. The guard is at the point of collection, not only on the timer: nothing is written outside
-the venue's session, including from a manual run — a price collected at 02:00 on a Sunday is a stale
+the exchange's session, including from a manual run — a price collected at 02:00 on a Sunday is a stale
 echo or a synthetic print, and either is what a screener should not be ranking on.
 
-What a run collects depends on the venue. The US gets the whole-market snapshot (one call, 100
+What a run collects depends on the exchange. The US gets the whole-market snapshot (one call, 100
 units). The ASX has no whole-market real-time feed, so its run is the settled daily bulk **plus**
 live prices for the top 100 listings by dollar volume on the last settled session
 (`MDS_SCHEDULE_PRICE_UNIVERSE`, one unit a symbol). That second part is what writes an observation
@@ -984,7 +986,7 @@ Invoke-RestMethod -Method Post 'http://127.0.0.1:8003/schedule/run?market=AU'   
 ```
 
 `GET /schedule` reports `done`, `waiting` or **`manual-intervention`** — the last means two attempts
-failed and the service has stopped trying, by design. A manual run still refuses outside the venue's
+failed and the service has stopped trying, by design. A manual run still refuses outside the exchange's
 session with `409 closed`, and does not consume the retry.
 
 The external `McTrader_Market_Data_Service_Daily` task (11:30 local) was **retired on 2026-11-01**: it
@@ -1152,6 +1154,7 @@ Run it by hand to check before installing:
 | `/secrets/eodhd` `backend` | reports the Rust credential-store backend instead of `WinVaultKeyring`; informational |
 | `/secrets/eodhd` surface | `DELETE` is removed, and `POST` is set-once: it answers 409 `key-already-set` when a key is already configured, so the key can only be set over HTTP when none exists |
 | `country_code` requirement | required on `/price`, `/prices`, `/atr`, `/bars`, `/todays-data-is-available` and `/todays-big-movers`; missing or unknown is a 422, where the Python service defaulted a bare symbol to US |
+| `venue` renamed to `exchange` | the request field, every response field, the `mixed-venues` error code (now `mixed-exchanges`) and the `SymbolPriceCache` column are all `exchange`. There is no `venue` compatibility path: this API's field is `exchange` only. Existing databases are renamed in place at startup |
 | OpenAPI document | generated by utoipa; paths, methods and fields match, but descriptions and ordering may differ from FastAPI's |
 | JSON numbers | parsed values match; textual formatting of floats may differ |
 | Request validation (body) | DTO refusals (`/bars`, `/prices`, `/atr`) are 422 with FastAPI's `{"detail":[...]}` shape; the `msg` text is not pydantic's |

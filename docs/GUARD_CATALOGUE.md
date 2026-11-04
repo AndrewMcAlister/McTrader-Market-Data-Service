@@ -12,33 +12,33 @@ the proof that the decision still lives in that file.
 
 ---
 
-## G-01 · Venue resolution
+## G-01 · Exchange resolution
 
-- **Location:** `src/domain/venues.rs` · `fn resolve_venue(`
+- **Location:** `src/domain/exchanges.rs` · `fn resolve_exchange(`
 - **Gates:** Every symbol endpoint — which market a ticker names.
 - **Trigger:** A missing `country_code` (the HTTP layer answers 422); a stated
-  `venue`/`country_code` that conflicts with the symbol's suffix; a batch mixing suffixes; an
-  unknown venue code.
+  `exchange`/`country_code` that conflicts with the symbol's suffix; a batch mixing suffixes; an
+  unknown exchange code.
 - **Clear:** Send `country_code` — `US` or `AU` — with bare symbols, or suffix every symbol the
   same way and state the matching country. `asset_class=crypto` resolves to `CRYPTO` (the
   country is required by the request shape but ignored).
 - **Config:** none.
-- **Tests:** `src/domain/venues.rs` · `venue_and_country_code_that_disagree_are_refused`
+- **Tests:** `src/domain/exchanges.rs` · `exchange_and_country_code_that_disagree_are_refused`
 
 `CBA` is both an ASX listing and a US listing. Serving one for the other returns a plausible
 price for the wrong instrument, which is indistinguishable from a correct answer to a caller.
 The HTTP layer requires `country_code` (`US`/`AU`) on every symbol-bearing endpoint, so a
 missing or unknown one is a 422 before this resolver runs. The precedence is stated market →
 symbol suffix → `US`; the last is now reachable only by internal callers. A conflict is a
-refusal (`unknown-venue`, `venue-conflict`, `mixed-venues`), never a guess. Crypto has no
-market and ignores any venue passed with it.
+refusal (`unknown-exchange`, `exchange-conflict`, `mixed-exchanges`), never a guess. Crypto has no
+market and ignores any exchange passed with it.
 
 ## G-02 · Settled sessions only
 
 - **Location:** `src/domain/sessions.rs` · `fn latest_completed_session(`
 - **Gates:** `POST /bars` and `POST /atr` — the newest session that may be served.
-- **Trigger:** The venue's close plus its three-hour settlement window has not passed; an
-  unknown or unresolved venue zone.
+- **Trigger:** The exchange's close plus its three-hour settlement window has not passed; an
+  unknown or unresolved exchange zone.
 - **Clear:** Wait for settlement. The rule is total: an unknown zone answers with the previous
   UTC date and logs, rather than failing or guessing the day in progress.
 - **Config:** none.
@@ -100,7 +100,7 @@ A row from a session still in progress is no better: it was computed from a part
 - **Location:** `src/products.rs` · `fn use_bulk(`
 - **Gates:** `POST /prices` choosing one whole-market call or per-symbol calls.
 - **Trigger:** Stale symbols at or above `MDS_BULK_BREAKEVEN` (100) **and** the market is `US`.
-- **Clear:** Smaller batches and every non-US venue go per-symbol; the response's `route` says
+- **Clear:** Smaller batches and every non-US exchange go per-symbol; the response's `route` says
   which way it went.
 - **Config:** `MDS_BULK_BREAKEVEN`.
 - **Tests:** `tests/products.rs` · `a_large_batch_goes_bulk_because_100_is_the_break_even`

@@ -141,7 +141,7 @@ impl Shared {
         &self.market
     }
 
-    /// The time source. Distinct from [`Self::market`]: the reference data says when a venue
+    /// The time source. Distinct from [`Self::market`]: the reference data says when an exchange
     /// trades, this says what time it is.
     pub fn clock(&self) -> &dyn Clock {
         self.clock.as_ref()

@@ -2,10 +2,10 @@
 
  * WHAT THE SERVICE ASKS FOR
  *
- *   the last N sessions for one symbol at one venue   -> PK (SymbolCode, Exchange, SnapshotDate)
+ *   the last N sessions for one symbol at one exchange   -> PK (SymbolCode, Exchange, SnapshotDate)
  *   one session, every symbol (movers, comparisons)   -> IX_DailySnapshot_Date
- *   one session at one venue                          -> IX_DailySnapshot_Date, plus a filter
- *   rebuild_indicators: COUNT(*) per symbol+venue     -> a scan of the clustered PK
+ *   one session at one exchange                          -> IX_DailySnapshot_Date, plus a filter
+ *   rebuild_indicators: COUNT(*) per symbol+exchange     -> a scan of the clustered PK
  *
  * The first is a clustered seek and needs nothing. The third is the one that was wrong: the
  * date index carried only (Close, High, Low), so any query that also wanted Volume, Open or
@@ -19,12 +19,12 @@
  *   [Exchange] INCLUDE [Open], [High], [Low], [Close]    impact 62.7
  *
  * So the date index becomes a covering index with Exchange as the second key: one session for
- * all symbols is still a seek on the leading column, one session at one venue is a seek on
+ * all symbols is still a seek on the leading column, one session at one exchange is a seek on
  * both, and every column a session-wide read has asked for is in the index.
  *
  * WHY NOTHING ELSE
  *
- * - SymbolPriceCache is 12,086 rows and 1.6 MB. Its per-venue MAX reads that whole table in
+ * - SymbolPriceCache is 12,086 rows and 1.6 MB. Its per-exchange MAX reads that whole table in
  *   under a millisecond; an index would cost more in writes than it saves in reads.
  * - IndicatorCache is 3,207 rows; its PK is already (SymbolCode, Exchange).
  * - EodhdUsage is 258 rows with PK (UsageDate, Caller, RequestType); its lookups are seeks.

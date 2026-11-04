@@ -181,10 +181,10 @@ impl FakeProducts {
     }
 }
 
-fn quote(symbol: &str, venue: &str) -> QuotePayload {
+fn quote(symbol: &str, exchange: &str) -> QuotePayload {
     QuotePayload {
         symbol: Some(symbol.to_string()),
-        venue: Some(venue.to_string()),
+        exchange: Some(exchange.to_string()),
         price: Some(123.45),
         previous_close: None,
         change_pct: None,
@@ -227,31 +227,31 @@ impl ProductLayer for FakeProducts {
     async fn price(
         &self,
         symbol: &str,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         max_age_seconds: Option<f64>,
         asset_class: Option<&str>,
         country_code: Option<&str>,
     ) -> Result<QuotePayload, ProductError> {
         self.record(format!(
-            "price:{symbol}:{venue:?}:{max_age_seconds:?}:{asset_class:?}:{country_code:?}"
+            "price:{symbol}:{exchange:?}:{max_age_seconds:?}:{asset_class:?}:{country_code:?}"
         ));
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
-        Ok(quote(symbol, venue.unwrap_or("US")))
+        Ok(quote(symbol, exchange.unwrap_or("US")))
     }
 
     async fn bars(
         &self,
         symbols: &[String],
         sessions: i64,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         allow_fetch: bool,
         asset_class: Option<&str>,
         country_code: Option<&str>,
     ) -> Result<BarsResponse, ProductError> {
         self.record(format!(
-            "bars:{symbols:?}:{sessions}:{venue:?}:{allow_fetch}:{asset_class:?}:{country_code:?}"
+            "bars:{symbols:?}:{sessions}:{exchange:?}:{allow_fetch}:{asset_class:?}:{country_code:?}"
         ));
         if let Some(error) = self.take_failure() {
             return Err(error);
@@ -272,7 +272,7 @@ impl ProductLayer for FakeProducts {
             request.period,
             request.method,
             request.smoothing,
-            request.venue,
+            request.exchange,
             request.price,
             request.multiplier,
             request.direction,
@@ -283,7 +283,7 @@ impl ProductLayer for FakeProducts {
         }
         Ok(AtrBatchResponse {
             atr: BTreeMap::new(),
-            venue: "US".to_string(),
+            exchange: "US".to_string(),
             period: request.period.unwrap_or(14),
             method: request.method.unwrap_or("gap").to_string(),
             smoothing: request.smoothing.unwrap_or("simple").to_string(),
@@ -298,33 +298,33 @@ impl ProductLayer for FakeProducts {
 
 #[async_trait]
 impl CollectionProducts for FakeProducts {
-    async fn refresh_snapshot(&self, _venue: &str) -> Result<usize, ProductError> {
+    async fn refresh_snapshot(&self, _exchange: &str) -> Result<usize, ProductError> {
         Ok(0)
     }
 
     async fn prices(
         &self,
         symbols: &[String],
-        venue: Option<&str>,
+        exchange: Option<&str>,
         max_age_seconds: Option<f64>,
         asset_class: Option<&str>,
         country_code: Option<&str>,
     ) -> Result<PricesResponse, ProductError> {
         self.record(format!(
-            "prices:{symbols:?}:{venue:?}:{max_age_seconds:?}:{asset_class:?}:{country_code:?}"
+            "prices:{symbols:?}:{exchange:?}:{max_age_seconds:?}:{asset_class:?}:{country_code:?}"
         ));
         if let Some(error) = self.take_failure() {
             return Err(error);
         }
-        let venue = venue.unwrap_or("US").to_string();
+        let exchange = exchange.unwrap_or("US").to_string();
         let quotes = symbols
             .iter()
-            .map(|symbol| (symbol.clone(), quote(symbol, &venue)))
+            .map(|symbol| (symbol.clone(), quote(symbol, &exchange)))
             .collect::<BTreeMap<_, _>>();
         Ok(PricesResponse {
             count: quotes.len(),
             quotes,
-            venue,
+            exchange,
             fetched: symbols.to_vec(),
             missing: Vec::new(),
             deferred: Vec::new(),
@@ -507,10 +507,10 @@ async fn an_empty_symbol_list_is_a_422_before_the_product_layer_is_touched() {
 }
 
 #[tokio::test]
-async fn an_unknown_venue_is_rendered_as_the_source_service_rendered_it() {
+async fn an_unknown_exchange_is_rendered_as_the_source_service_rendered_it() {
     let products = FakeProducts::failing(ProductError::Refused(MarketDataError::bad_request(
-        "unknown-venue",
-        "could not resolve a venue for ['VOD']",
+        "unknown-exchange",
+        "could not resolve an exchange for ['VOD']",
     )));
     let reply = call(
         &state(Some(products)),
@@ -518,29 +518,29 @@ async fn an_unknown_venue_is_rendered_as_the_source_service_rendered_it() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
-    assert_eq!(reply.body["error"], "unknown-venue");
+    assert_eq!(reply.body["error"], "unknown-exchange");
     assert_eq!(
         reply.body["detail"],
-        "could not resolve a venue for ['VOD']"
+        "could not resolve an exchange for ['VOD']"
     );
 }
 
 #[tokio::test]
-async fn a_venue_conflict_keeps_its_reason_and_status() {
+async fn a_exchange_conflict_keeps_its_reason_and_status() {
     let products = FakeProducts::failing(ProductError::Refused(MarketDataError::bad_request(
-        "venue-conflict",
-        "stated venue US disagrees with suffix .AU on CBA.AU",
+        "exchange-conflict",
+        "stated exchange US disagrees with suffix .AU on CBA.AU",
     )));
     let reply = call(
         &state(Some(products)),
         post_json(
             "/prices",
-            json!({"symbols": ["CBA.AU"], "venue": "US", "country_code": "US"}),
+            json!({"symbols": ["CBA.AU"], "exchange": "US", "country_code": "US"}),
         ),
     )
     .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
-    assert_eq!(reply.body["error"], "venue-conflict");
+    assert_eq!(reply.body["error"], "exchange-conflict");
 }
 
 #[tokio::test]
@@ -555,7 +555,7 @@ async fn the_country_code_is_normalised_before_it_reaches_the_product_layer() {
     )
     .await;
     assert_eq!(reply.status, StatusCode::OK);
-    assert_eq!(reply.body["venue"], "US");
+    assert_eq!(reply.body["exchange"], "US");
     assert_eq!(
         products.calls(),
         vec!["prices:[\"CBA.AU\"]:None:None:Some(\"shares\"):Some(\"AU\")"]
@@ -616,7 +616,7 @@ async fn the_get_price_query_reaches_the_product_layer() {
     let products = FakeProducts::ok();
     let reply = call(
         &state(Some(products.clone())),
-        get("/price/tsla?venue=US&max_age_seconds=60&asset_class=shares&country_code=us"),
+        get("/price/tsla?exchange=US&max_age_seconds=60&asset_class=shares&country_code=us"),
     )
     .await;
     assert_eq!(reply.status, StatusCode::OK);
@@ -789,7 +789,7 @@ async fn a_manual_run_answers_409_when_it_refused() {
     let (state, _) = scheduled_state(MarketRun::new(
         false,
         "closed",
-        "the venue is not open; nothing was collected",
+        "the exchange is not open; nothing was collected",
     ));
     let reply = call(&state, post_empty("/schedule/run?market=AU")).await;
 

@@ -28,7 +28,7 @@ use chrono::Utc;
 use serde_json::Value;
 
 use crate::domain::asset_class::AssetClass;
-use crate::domain::symbols::{symbol_for_provider, venue_currency_code, ProviderId, YAHOO};
+use crate::domain::symbols::{exchange_currency_code, symbol_for_provider, ProviderId, YAHOO};
 use crate::error::ProviderFailure;
 use crate::providers::base::{
     epoch_date, epoch_naive, number, text, truthy, volume, Provider, ProviderBar, ProviderQuote,
@@ -265,9 +265,9 @@ impl Provider for YahooProvider {
         &self,
         symbol: &str,
         asset_class: AssetClass,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Result<Option<ProviderQuote>, ProviderFailure> {
-        let Some(ticker) = symbol_for_provider(symbol, asset_class, venue, ProviderId::Yahoo)
+        let Some(ticker) = symbol_for_provider(symbol, asset_class, exchange, ProviderId::Yahoo)
         else {
             return Ok(None);
         };
@@ -322,11 +322,11 @@ impl Provider for YahooProvider {
                     .get("currency")
                     .filter(|currency| truthy(currency))
                     .and_then(text);
-                stated.or_else(|| venue_currency_code(symbol, venue).map(str::to_string))
+                stated.or_else(|| exchange_currency_code(symbol, exchange).map(str::to_string))
             },
             raw_ticker: Some(ticker),
             // Volume from the same meta block as the price, so a mover list has the traded
-            // size for indices and FX too, not just for the venues EODHD prices.
+            // size for indices and FX too, not just for the exchanges EODHD prices.
             volume: volume(meta.get("regularMarketVolume").unwrap_or(&Value::Null)),
         }))
     }
@@ -337,9 +337,9 @@ impl Provider for YahooProvider {
         symbol: &str,
         asset_class: AssetClass,
         sessions: usize,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Result<Vec<ProviderBar>, ProviderFailure> {
-        let Some(ticker) = symbol_for_provider(symbol, asset_class, venue, ProviderId::Yahoo)
+        let Some(ticker) = symbol_for_provider(symbol, asset_class, exchange, ProviderId::Yahoo)
         else {
             return Ok(Vec::new());
         };

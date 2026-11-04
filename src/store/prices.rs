@@ -1,6 +1,6 @@
 //! `SymbolPriceCache` reads and writes.
 //!
-//! The cache is keyed by `(SymbolCode, Venue)`, so a venue is part of every question rather
+//! The cache is keyed by `(SymbolCode, Exchange)`, so an exchange is part of every question rather
 //! than an attribute of the answer. Writes are one `MERGE` per parameter-bounded block of
 //! rows: the source service used `executemany`, which batched thousands of statements into
 //! one round trip; TDS has no equivalent, so the block size is derived from SQL Server's
@@ -37,25 +37,28 @@ pub trait PriceRepository: Send + Sync {
     async fn get_prices(
         &self,
         symbols: &[String],
-        venue: &str,
+        exchange: &str,
     ) -> Result<HashMap<String, CachedPrice>, StoreError>;
 
     async fn upsert_prices(&self, rows: Vec<PriceRow>) -> Result<usize, StoreError>;
 
     async fn big_movers(
         &self,
-        venue: &str,
+        exchange: &str,
         limit: i64,
         min_price: f64,
         min_dollar_volume: f64,
         since: Option<NaiveDateTime>,
     ) -> Result<Movers, StoreError>;
 
-    async fn latest_venue_price(&self, venue: &str) -> Result<Option<NaiveDateTime>, StoreError>;
+    async fn latest_exchange_price(
+        &self,
+        exchange: &str,
+    ) -> Result<Option<NaiveDateTime>, StoreError>;
 
     async fn top_symbols_by_dollar_volume(
         &self,
-        venue: &str,
+        exchange: &str,
         limit: i64,
         min_breadth: i64,
     ) -> Result<Vec<String>, StoreError>;
@@ -66,7 +69,7 @@ impl PriceRepository for SqlServerStore {
     async fn get_prices(
         &self,
         symbols: &[String],
-        venue: &str,
+        exchange: &str,
     ) -> Result<HashMap<String, CachedPrice>, StoreError> {
         let wanted = normalise_symbols(symbols);
         if wanted.is_empty() {
@@ -76,14 +79,14 @@ impl PriceRepository for SqlServerStore {
         let mut out = HashMap::with_capacity(wanted.len());
         for chunk in wanted.chunks(PRICE_READ_CHUNK) {
             let sql = format!(
-                "SELECT SymbolCode, Venue, Price, Bid, Ask, PreviousClose, ChangePct, \
+                "SELECT SymbolCode, Exchange, Price, Bid, Ask, PreviousClose, ChangePct, \
                         AsOfUtc, LastUpdatedUtc, Source \
                    FROM dbo.SymbolPriceCache \
-                  WHERE Venue = @P1 AND SymbolCode IN ({})",
+                  WHERE Exchange = @P1 AND SymbolCode IN ({})",
                 super::sql::placeholders(2, chunk.len())
             );
             let mut params = Vec::with_capacity(chunk.len() + 1);
-            params.push(SqlParam::text(venue));
+            params.push(SqlParam::text(exchange));
             params.extend(chunk.iter().map(SqlParam::text));
             let rows = query_rows(&mut client, &sql, &params).await?;
             for row in &rows {
@@ -93,7 +96,7 @@ impl PriceRepository for SqlServerStore {
                     key.clone(),
                     CachedPrice {
                         symbol: key,
-                        venue: required_text(row, 1, "Venue")?,
+                        exchange: required_text(row, 1, "Exchange")?,
                         price: decimal(row, 2)?,
                         bid: decimal(row, 3)?,
                         ask: decimal(row, 4)?,
@@ -136,7 +139,7 @@ impl PriceRepository for SqlServerStore {
 
     async fn big_movers(
         &self,
-        venue: &str,
+        exchange: &str,
         limit: i64,
         min_price: f64,
         min_dollar_volume: f64,
@@ -152,7 +155,7 @@ impl PriceRepository for SqlServerStore {
             let sql = movers_sql(direction, order, since.is_some());
             let mut params = vec![
                 SqlParam::integer(limit),
-                SqlParam::text(venue),
+                SqlParam::text(exchange),
                 SqlParam::float(min_price),
                 SqlParam::float(min_dollar_volume),
             ];
@@ -176,13 +179,16 @@ impl PriceRepository for SqlServerStore {
         Ok(movers)
     }
 
-    async fn latest_venue_price(&self, venue: &str) -> Result<Option<NaiveDateTime>, StoreError> {
+    async fn latest_exchange_price(
+        &self,
+        exchange: &str,
+    ) -> Result<Option<NaiveDateTime>, StoreError> {
         let mut client = self.connection().await?;
         let rows = query_rows(
             &mut client,
             "SELECT MAX(COALESCE(AsOfUtc, LastUpdatedUtc)) \
-               FROM dbo.SymbolPriceCache WHERE Venue = @P1",
-            &[SqlParam::text(venue)],
+               FROM dbo.SymbolPriceCache WHERE Exchange = @P1",
+            &[SqlParam::text(exchange)],
         )
         .await?;
         match rows.first() {
@@ -193,7 +199,7 @@ impl PriceRepository for SqlServerStore {
 
     async fn top_symbols_by_dollar_volume(
         &self,
-        venue: &str,
+        exchange: &str,
         limit: i64,
         min_breadth: i64,
     ) -> Result<Vec<String>, StoreError> {
@@ -206,10 +212,10 @@ impl PriceRepository for SqlServerStore {
             &mut client,
             TOP_SYMBOLS_SQL,
             &[
-                SqlParam::text(venue),
+                SqlParam::text(exchange),
                 SqlParam::integer(min_breadth.max(1)),
                 SqlParam::integer(limit),
-                SqlParam::text(venue),
+                SqlParam::text(exchange),
             ],
         )
         .await?;
@@ -221,10 +227,10 @@ impl PriceRepository for SqlServerStore {
 
 /// One row's eleven parameters, in the column order [`merge_prices_sql`] states.
 fn price_params(row: &PriceRow, now: NaiveDateTime) -> Result<Vec<SqlParam>, StoreError> {
-    let venue = required_exchange_key(row.venue.as_deref())?;
+    let exchange = required_exchange_key(row.exchange.as_deref())?;
     Ok(vec![
         SqlParam::text(&row.symbol),
-        SqlParam::text(venue),
+        SqlParam::text(exchange),
         SqlParam::float(row.price),
         SqlParam::optional_float(row.bid),
         SqlParam::optional_float(row.ask),
@@ -242,9 +248,9 @@ fn merge_prices_sql(rows: usize) -> String {
     format!(
         "MERGE dbo.SymbolPriceCache AS target \
          USING (VALUES {}) AS source \
-             (SymbolCode, Venue, Price, Bid, Ask, PreviousClose, ChangePct, Volume, \
+             (SymbolCode, Exchange, Price, Bid, Ask, PreviousClose, ChangePct, Volume, \
               AsOfUtc, LastUpdatedUtc, Source) \
-             ON target.SymbolCode = source.SymbolCode AND target.Venue = source.Venue \
+             ON target.SymbolCode = source.SymbolCode AND target.Exchange = source.Exchange \
          WHEN MATCHED THEN UPDATE SET \
              Price = source.Price, Bid = source.Bid, Ask = source.Ask, \
              PreviousClose = source.PreviousClose, ChangePct = source.ChangePct, \
@@ -252,10 +258,10 @@ fn merge_prices_sql(rows: usize) -> String {
              AsOfUtc = source.AsOfUtc, LastUpdatedUtc = source.LastUpdatedUtc, \
              Source = source.Source \
          WHEN NOT MATCHED THEN INSERT \
-             (SymbolCode, Venue, Price, Bid, Ask, PreviousClose, ChangePct, Volume, AsOfUtc, \
+             (SymbolCode, Exchange, Price, Bid, Ask, PreviousClose, ChangePct, Volume, AsOfUtc, \
               LastUpdatedUtc, Source) \
          VALUES \
-             (source.SymbolCode, source.Venue, source.Price, source.Bid, source.Ask, \
+             (source.SymbolCode, source.Exchange, source.Price, source.Bid, source.Ask, \
               source.PreviousClose, source.ChangePct, source.Volume, source.AsOfUtc, \
               source.LastUpdatedUtc, source.Source);",
         values_rows(rows, PRICE_PARAMS_PER_ROW)
@@ -274,7 +280,7 @@ fn movers_sql(direction: &str, order: &str, since: bool) -> String {
                 SymbolCode, Price, ChangePct, Volume, PreviousClose, AsOfUtc, \
                 Source, CAST(Price * Volume AS decimal(38, 2)) AS DollarVolume \
            FROM dbo.SymbolPriceCache \
-          WHERE Venue = @P2 \
+          WHERE Exchange = @P2 \
             AND Price >= @P3 \
             AND ChangePct IS NOT NULL \
             AND Volume IS NOT NULL AND Volume > 0 \
@@ -307,11 +313,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_merge_names_every_column_and_keeps_the_venue_key() {
+    fn the_merge_names_every_column_and_keeps_the_exchange_key() {
         let sql = merge_prices_sql(2);
         assert!(sql.contains("MERGE dbo.SymbolPriceCache AS target"));
         assert!(sql.contains("ON target.SymbolCode = source.SymbolCode"));
-        assert!(sql.contains("AND target.Venue = source.Venue"));
+        assert!(sql.contains("AND target.Exchange = source.Exchange"));
         assert!(sql.contains("(@P1,@P2,@P3,@P4,@P5,@P6,@P7,@P8,@P9,@P10,@P11)"));
         assert!(sql.contains("(@P12,"));
         assert!(sql.trim_end().ends_with(';'));
@@ -328,7 +334,7 @@ mod tests {
     fn price_parameters_follow_the_column_order() {
         let row = PriceRow {
             symbol: "AAPL".into(),
-            venue: Some("us".into()),
+            exchange: Some("us".into()),
             price: 100.0,
             bid: Some(99.9),
             ask: None,
@@ -358,10 +364,10 @@ mod tests {
     }
 
     #[test]
-    fn a_price_row_without_a_venue_is_refused_before_connecting() {
+    fn a_price_row_without_a_exchange_is_refused_before_connecting() {
         let row = PriceRow {
             symbol: "AAPL".into(),
-            venue: None,
+            exchange: None,
             price: 100.0,
             bid: None,
             ask: None,

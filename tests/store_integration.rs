@@ -18,7 +18,7 @@
 //!
 //! `MDS_TEST_SCHEMA=1` additionally runs the embedded schema script. Point that at a
 //! **disposable** database only: the script documents the estate tables and, on an old
-//! database, clears `IndicatorCache` as part of its venue-key migration.
+//! database, clears `IndicatorCache` as part of its exchange-key migration.
 //!
 //! `MDS_TEST_CONCURRENCY=1` additionally runs the lock-wait test, which needs **two
 //! simultaneous TDS sessions**. TDS only reaches SQL Server over TCP, so the server's TCP/IP

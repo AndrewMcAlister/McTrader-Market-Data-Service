@@ -1,7 +1,7 @@
 //! `IndicatorCache` reads and writes.
 //!
 //! The cache is keyed by `(SymbolCode, Exchange)`, so the same ticker can hold a US ATR and an
-//! ASX one. Reads and writes therefore take the venue from the same place every time; a read
+//! ASX one. Reads and writes therefore take the exchange from the same place every time; a read
 //! that says nothing means US, a write that says nothing is refused.
 //!
 //! `Atr14`..`Atr50` are five columns rather than a period-keyed table because they are the
@@ -188,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn the_merge_names_every_column_and_keeps_the_venue_key() {
+    fn the_merge_names_every_column_and_keeps_the_exchange_key() {
         let sql = merge_indicators_sql(2);
         assert!(sql.contains("MERGE dbo.IndicatorCache AS target"));
         assert!(sql.contains("ON target.SymbolCode = source.SymbolCode"));

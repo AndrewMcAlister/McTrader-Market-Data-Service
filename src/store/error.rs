@@ -37,7 +37,7 @@ pub enum StoreError {
     #[error("database error: {0}")]
     Database(String),
     /// A writer supplied data the schema requires but did not provide, such as a single
-    /// price row with no venue. This is a programming error, never a caller's request shape.
+    /// price row with no exchange. This is a programming error, never a caller's request shape.
     #[error("invalid store row: {0}")]
     Invalid(String),
 }
@@ -164,10 +164,10 @@ mod tests {
 
     #[test]
     fn an_invalid_row_names_what_was_missing() {
-        let error = StoreError::invalid("a price row has no venue");
+        let error = StoreError::invalid("a price row has no exchange");
         assert_eq!(
             error.to_string(),
-            "invalid store row: a price row has no venue"
+            "invalid store row: a price row has no exchange"
         );
     }
 }

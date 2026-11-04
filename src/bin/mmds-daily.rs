@@ -64,7 +64,7 @@ struct Args {
     #[arg(long, value_name = "YYYY-MM-DD", value_parser = parse_date)]
     since: Option<NaiveDate>,
 
-    /// The venue to pull and to stamp on written rows.
+    /// The exchange to pull and to stamp on written rows.
     #[arg(long, default_value = "US")]
     market: String,
 

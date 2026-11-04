@@ -17,7 +17,7 @@ const PING_SQL: &str = "SELECT 1";
 /// Row counts for `/stats` and the job's log line.
 ///
 /// `daily_symbols` counts (symbol, exchange) pairs, not bare tickers: one ticker on two
-/// venues is two series, and the count that matters is the number of series.
+/// exchanges is two series, and the count that matters is the number of series.
 const STATS_SQL: &str = "\
 SELECT
     (SELECT COUNT(*) FROM dbo.SymbolPriceCache),

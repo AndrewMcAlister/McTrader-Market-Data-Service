@@ -15,8 +15,8 @@
  *
  * WHY THESE SHAPES
  *
- * SymbolPriceCache holds the latest known price per symbol, keyed (symbol, venue).
- * The venue is in the key because AAPL.US and AAPL.AU are different instruments and
+ * SymbolPriceCache holds the latest known price per symbol, keyed (symbol, exchange).
+ * The exchange is in the key because AAPL.US and AAPL.AU are different instruments and
  * a bare-symbol key would let one overwrite the other.
  *
  * It carries PreviousClose and ChangePct beyond the five columns originally specified,
@@ -29,14 +29,14 @@
  * carries open/high/low/close/previousClose/volume but no quote side. The columns cost
  * nothing and document that the absence is a vendor fact, not an omission.
  *
- * DailySnapshot is the daily bar series, one row per symbol per venue per session. It is
+ * DailySnapshot is the daily bar series, one row per symbol per exchange per session. It is
  * keyed (SymbolCode, Exchange, SnapshotDate) in that order so "the last N sessions for one
- * symbol on one venue" is a clustered seek -- the exact access path an ATR read needs. The
- * venue is in the key because a bare ticker is not unique: the same code can be an ASX
- * listing and a US one, and a symbol-only key lets one venue's row overwrite the other's
+ * symbol on one exchange" is a clustered seek -- the exact access path an ATR read needs. The
+ * exchange is in the key because a bare ticker is not unique: the same code can be an ASX
+ * listing and a US one, and a symbol-only key lets one exchange's row overwrite the other's
  * without a word.
  *
- * The venue has no default, on any of the three tables. A row filed under the wrong venue
+ * The exchange has no default, on any of the three tables. A row filed under the wrong exchange
  * is indistinguishable from a right one, so the database does not invent one: every writer
  * must state it, and a write that does not is refused rather than filed as US.
  *
@@ -65,7 +65,7 @@ IF OBJECT_ID('dbo.SymbolPriceCache', 'U') IS NULL
 BEGIN
     CREATE TABLE dbo.SymbolPriceCache (
         SymbolCode     varchar(24)   NOT NULL,
-        Venue          varchar(8)    NOT NULL,
+        Exchange       varchar(8)    NOT NULL,
         Price          decimal(18,6) NOT NULL,
         Bid            decimal(18,6) NULL,
         Ask            decimal(18,6) NULL,
@@ -75,7 +75,7 @@ BEGIN
         AsOfUtc        datetime2     NULL,
         LastUpdatedUtc datetime2     NOT NULL,
         Source         varchar(16)   NOT NULL,
-        CONSTRAINT PK_SymbolPriceCache PRIMARY KEY CLUSTERED (SymbolCode, Venue)
+        CONSTRAINT PK_SymbolPriceCache PRIMARY KEY CLUSTERED (SymbolCode, Exchange)
     );
 
     /* The scan asks "everything I priced in the last five minutes"; without this the
@@ -93,8 +93,20 @@ IF COL_LENGTH('dbo.SymbolPriceCache', 'Volume') IS NULL
     ALTER TABLE dbo.SymbolPriceCache ADD Volume bigint NULL;
 GO
 
+/* The price cache's market column was called Venue while the two bar tables called the same
+   thing Exchange. The API now says exchange everywhere, so the cache follows. sp_rename keeps
+   the rows, the data and the clustered key; the guard lets a fresh database -- created with
+   Exchange above -- skip it, and the COL_LENGTH check makes a re-run safe. The index on
+   (SymbolCode, Exchange) tracks the column rename, so nothing else has to be rebuilt. */
+IF COL_LENGTH('dbo.SymbolPriceCache', 'Venue') IS NOT NULL
+   AND COL_LENGTH('dbo.SymbolPriceCache', 'Exchange') IS NULL
+BEGIN
+    EXEC sp_rename 'dbo.SymbolPriceCache.Venue', 'Exchange', 'COLUMN';
+END
+GO
+
 /* ------------------------------------------------------------------ */
-/* 2. DailySnapshot — the daily bar series, one row per symbol-venue-session */
+/* 2. DailySnapshot — the daily bar series, one row per symbol-exchange-session */
 /* ------------------------------------------------------------------ */
 IF OBJECT_ID('dbo.DailySnapshot', 'U') IS NULL
 BEGIN
@@ -155,7 +167,7 @@ GO
 IF NOT EXISTS (SELECT 1 FROM dbo.TableDoc WHERE TableName = 'SymbolPriceCache')
     INSERT INTO dbo.TableDoc (TableName, Grain, Purpose, RowCountNote, DataSource)
     VALUES ('SymbolPriceCache',
-            'one row per symbol per venue',
+            'one row per symbol per exchange',
             'LATEST KNOWN PRICE, written by D:\McTrader_Market_Data_Service. Operational, not historical: a row is overwritten in place when the price is refreshed, so this table holds one price per instrument and no history. Read it when you want the current price; never join it to a past session, because the row carries no record of what it said yesterday. Source=''eodhd''; LastUpdatedUtc is when this service fetched it, AsOfUtc is when the vendor observed it and can be older.',
             'grows to the priced universe (~2.8k rows)', 'measured');
 GO
@@ -163,7 +175,7 @@ GO
 IF NOT EXISTS (SELECT 1 FROM dbo.TableDoc WHERE TableName = 'DailySnapshot')
     INSERT INTO dbo.TableDoc (TableName, Grain, Purpose, RowCountNote, DataSource)
     VALUES ('DailySnapshot',
-            'one row per symbol per venue per session',
+            'one row per symbol per exchange per session',
             'Daily OHLCV, appended once per session by D:\McTrader_Market_Data_Service from EODHD /eod-bulk-last-day. Close is adjusted_close where the vendor supplies it (IsAdjusted=1), matching BarHourly''s convention and never mixed with Bar5Min, which is unadjusted. RawClose is the unadjusted close and may be NULL where it is not known (the BarHourly seed). This is the series ATR is computed from; IndicatorCache holds the result.',
             'universe x sessions', 'measured');
 GO
@@ -171,7 +183,7 @@ GO
 IF NOT EXISTS (SELECT 1 FROM dbo.TableDoc WHERE TableName = 'IndicatorCache')
     INSERT INTO dbo.TableDoc (TableName, Grain, Purpose, RowCountNote, DataSource)
     VALUES ('IndicatorCache',
-            'one row per symbol per venue',
+            'one row per symbol per exchange',
             'PRECOMPUTED ATR, so no trader recalculates it at entry time. Method ''tr'' is gap-inclusive true range max(H-L, |H-prevClose|, |L-prevClose|); ''high_low'' is H-L only, which is NOT what any McTrader/PaperTrader implementation uses and narrows a stop. Smoothing ''simple'' is the mean of the last N true ranges (what the two stop books use); ''wilder'' is Wilder''s recursion. Percent is derived: Atr / ReferencePrice * 100.',
             'one row per symbol with enough history', 'derived');
 GO
@@ -271,7 +283,7 @@ CREATE OR ALTER VIEW dbo.SymbolPriceCacheLocal
 AS
 SELECT
     SymbolCode,
-    Venue,
+    Exchange,
     Price,
     Bid,
     Ask,
@@ -298,7 +310,7 @@ GO
 /* ------------------------------------------------------------------ */
 /* A bare ticker is not unique: the same code can be an ASX listing and a US one, and with
    a symbol-only key the two overwrite each other -- the US pull silently replacing the AU
-   row for the same date. Both bar tables are keyed with the venue from here on, and every
+   row for the same date. Both bar tables are keyed with the exchange from here on, and every
    writer states it: a write that omits the exchange is refused rather than filed as US,
    because "unknown" and "US" are not the same claim.
 
@@ -306,7 +318,7 @@ GO
    only when it does not already include Exchange. The backfill runs in the same batch as the
    key rebuild, so it happens once rather than on every start. It moves a row only when the
    price cache knows that symbol as AU and knows it as nothing else -- a symbol known on both
-   venues is left as US rather than guessed at. On the live database it found 18,363 rows
+   exchanges is left as US rather than guessed at. On the live database it found 18,363 rows
    that had been AU all along and were indistinguishable from US ones. */
 
 IF COL_LENGTH('dbo.DailySnapshot', 'Exchange') IS NULL
@@ -326,9 +338,9 @@ BEGIN
        SET Exchange = 'AU'
       FROM dbo.DailySnapshot d
      WHERE EXISTS (SELECT 1 FROM dbo.SymbolPriceCache p
-                    WHERE p.SymbolCode = d.SymbolCode AND p.Venue = 'AU')
+                    WHERE p.SymbolCode = d.SymbolCode AND p.Exchange = 'AU')
        AND NOT EXISTS (SELECT 1 FROM dbo.SymbolPriceCache p
-                        WHERE p.SymbolCode = d.SymbolCode AND p.Venue = 'US');
+                        WHERE p.SymbolCode = d.SymbolCode AND p.Exchange = 'US');
 END
 GO
 
@@ -348,9 +360,9 @@ END
 GO
 
 /* The column is added with a temporary default because SQL Server needs one to fill the
-   rows that already exist. It does not stay. A default turns "this writer forgot the venue"
+   rows that already exist. It does not stay. A default turns "this writer forgot the exchange"
    into "this row is US" -- a claim the writer never made, and the exact silent mislabel the
-   key exists to prevent. After this, a write without a venue fails instead. */
+   key exists to prevent. After this, a write without an exchange fails instead. */
 
 IF EXISTS (SELECT 1 FROM sys.default_constraints
             WHERE name = 'DF_DailySnapshot_Exchange'
@@ -364,6 +376,9 @@ IF EXISTS (SELECT 1 FROM sys.default_constraints
     ALTER TABLE dbo.IndicatorCache DROP CONSTRAINT DF_IndicatorCache_Exchange;
 GO
 
+/* This block looks for the old name on purpose: sp_rename renames a column, not the default
+   bound to it, so a database that predates the rename still carries
+   DF_SymbolPriceCache_Venue. Looking for the new name would leave that default in place. */
 IF EXISTS (SELECT 1 FROM sys.default_constraints
             WHERE name = 'DF_SymbolPriceCache_Venue'
               AND parent_object_id = OBJECT_ID('dbo.SymbolPriceCache'))
@@ -374,12 +389,27 @@ GO
    reader trusts a sentence that is no longer true -- and the doc rows are written after the
    migration, so they cannot describe a column that is not there. */
 
-UPDATE dbo.TableDoc SET Grain = 'one row per symbol per venue per session'
+UPDATE dbo.TableDoc SET Grain = 'one row per symbol per exchange per session'
  WHERE TableName = 'DailySnapshot' AND Grain = 'one row per symbol per session';
 GO
 
-UPDATE dbo.TableDoc SET Grain = 'one row per symbol per venue'
+UPDATE dbo.TableDoc SET Grain = 'one row per symbol per exchange'
  WHERE TableName = 'IndicatorCache' AND Grain = 'one row per symbol';
+GO
+
+/* These three rows were written while the cache column was still called Venue. The rename
+   did not change the grain, so only the wording has to follow; WITHOUT this an existing
+   database keeps describing a column that no longer exists. */
+UPDATE dbo.TableDoc SET Grain = 'one row per symbol per exchange'
+ WHERE TableName = 'SymbolPriceCache' AND Grain = 'one row per symbol per venue';
+GO
+
+UPDATE dbo.TableDoc SET Grain = 'one row per symbol per exchange per session'
+ WHERE TableName = 'DailySnapshot' AND Grain = 'one row per symbol per venue per session';
+GO
+
+UPDATE dbo.TableDoc SET Grain = 'one row per symbol per exchange'
+ WHERE TableName = 'IndicatorCache' AND Grain = 'one row per symbol per venue';
 GO
 
 /* ------------------------------------------------------------------ */
@@ -408,24 +438,24 @@ GO
 
 IF NOT EXISTS (SELECT 1 FROM dbo.ColumnDoc WHERE TableName = 'DailySnapshot' AND ColumnName = 'Exchange')
     INSERT INTO dbo.ColumnDoc (TableName, ColumnName, DataType, Unit, Meaning, Notes)
-    VALUES ('DailySnapshot', 'Exchange', 'varchar(8)', 'venue code',
+    VALUES ('DailySnapshot', 'Exchange', 'varchar(8)', 'exchange code',
             'Which listing the bar belongs to: US, AU, ... (the vendor''s exchange code).',
-            'Part of the clustered key, because a bare ticker is not unique: the same code can be an ASX listing and a US one, and without the venue one pull overwrites the other. Rows written before 2026-11-01 were backfilled from the price cache, so a row dated before then can only be trusted for its venue when the symbol was known on one exchange.');
+            'Part of the clustered key, because a bare ticker is not unique: the same code can be an ASX listing and a US one, and without the exchange one pull overwrites the other. Rows written before 2026-11-01 were backfilled from the price cache, so a row dated before then can only be trusted for its exchange when the symbol was known on one exchange.');
 GO
 
 IF NOT EXISTS (SELECT 1 FROM dbo.ColumnDoc WHERE TableName = 'IndicatorCache' AND ColumnName = 'Exchange')
 BEGIN
-    /* Every ATR in the cache predates the venue key: it was computed under a symbol-only
-       key, so it is either labelled with the wrong venue or has both venues' bars mixed
+    /* Every ATR in the cache predates the exchange key: it was computed under a symbol-only
+       key, so it is either labelled with the wrong exchange or has both exchanges' bars mixed
        into one number. A derived value whose series is unknown is not worth keeping -- it
        rebuilds from the daily refresh, or from /atr on demand. The ColumnDoc row below is
        written in the same batch, so it is what marks this cleanup as done. */
     DELETE FROM dbo.IndicatorCache;
 
     INSERT INTO dbo.ColumnDoc (TableName, ColumnName, DataType, Unit, Meaning, Notes)
-    VALUES ('IndicatorCache', 'Exchange', 'varchar(8)', 'venue code',
-            'The venue whose daily series the ATR was measured on.',
-            'Part of the primary key. An ATR is a property of one venue''s series: mixing an ASX bar into a US series reads the currency difference as a move, and a symbol-only key would serve whichever row the database returned first.');
+    VALUES ('IndicatorCache', 'Exchange', 'varchar(8)', 'exchange code',
+            'The exchange whose daily series the ATR was measured on.',
+            'Part of the primary key. An ATR is a property of one exchange''s series: mixing an ASX bar into a US series reads the currency difference as a move, and a symbol-only key would serve whichever row the database returned first.');
 END
 GO
 

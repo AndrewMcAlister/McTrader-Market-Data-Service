@@ -150,7 +150,7 @@ async fn load_clock(store: &SqlServerStore) -> Result<MarketClock, Fatal> {
         Err(error) => {
             tracing::warn!(
                 "clock: could not read dbo.Exchanges, falling back to {CLOCK_REFERENCE} for \
-                 venues too ({error})"
+                 exchanges too ({error})"
             );
             None
         }

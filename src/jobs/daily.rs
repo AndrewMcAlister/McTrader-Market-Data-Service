@@ -33,7 +33,7 @@ use serde_json::Value;
 use crate::config::Settings;
 use crate::domain::atr;
 use crate::providers::base::{number, text};
-use crate::providers::eodhd_client::{bare_symbol, normalise_venue};
+use crate::providers::eodhd_client::{bare_symbol, normalise_exchange};
 use crate::refresh::{RefreshFailure, RefreshJobs, RefreshStore, RefreshVendor};
 use crate::store::keys::required_exchange_key;
 use crate::store::models::{DailyBarWrite, IndicatorWrite, SeriesKey, StoredBar};
@@ -71,7 +71,7 @@ pub struct RebuildSummary {
 
 /// One bulk row as a `DailySnapshot` row, preferring `adjusted_close`.
 ///
-/// `market` has no default: this is the function that stamps the venue, and a default here
+/// `market` has no default: this is the function that stamps the exchange, and a default here
 /// would file an ASX pull as US without anyone deciding to.
 pub fn row_from_bulk(
     raw: &Value,
@@ -99,7 +99,7 @@ pub fn row_from_bulk(
 
     Some(DailyBarWrite {
         symbol: code,
-        // The venue is stamped on the row rather than assumed at read time: the ASX and the
+        // The exchange is stamped on the row rather than assumed at read time: the ASX and the
         // US both file 2026-10-30, and a symbol-only key is how one overwrote the other.
         exchange: required_exchange_key(Some(market)).ok(),
         session: session_date,
@@ -125,7 +125,7 @@ fn field(raw: &Value, name: &str) -> Option<f64> {
 
 /// Pull one or more sessions of whole-market daily bars into `DailySnapshot`.
 ///
-/// An explicit date that the venue did not trade resolves to the session the vendor actually
+/// An explicit date that the exchange did not trade resolves to the session the vendor actually
 /// answered with, and the mismatch is logged rather than hidden.
 pub async fn pull_bulk<S>(
     store: &S,
@@ -136,9 +136,9 @@ pub async fn pull_bulk<S>(
 where
     S: DailyBarRepository + ?Sized,
 {
-    // Normalised once, here: "ASX" and "AU" are the same venue, an unknown one is refused
+    // Normalised once, here: "ASX" and "AU" are the same exchange, an unknown one is refused
     // before a unit is spent, and the value written to the row is the one reads filter on.
-    let market = normalise_venue(Some(market))?;
+    let market = normalise_exchange(Some(market))?;
     let wanted_dates: Vec<Option<NaiveDate>> = match dates {
         Some(dates) => dates.into_iter().map(Some).collect(),
         None => vec![None],
@@ -243,8 +243,8 @@ where
         series.len()
     );
 
-    // Per venue: a series must not mix an ASX bar with a US one, and the same ticker can
-    // exist on both. The store returns the work list ordered by venue then symbol.
+    // Per exchange: a series must not mix an ASX bar with a US one, and the same ticker can
+    // exist on both. The store returns the work list ordered by exchange then symbol.
     let mut by_exchange: BTreeMap<&str, Vec<&SeriesKey>> = BTreeMap::new();
     for key in &series {
         by_exchange
@@ -266,7 +266,7 @@ where
     })
 }
 
-/// Rebuild one venue's series, one parameter-bounded batch at a time.
+/// Rebuild one exchange's series, one parameter-bounded batch at a time.
 async fn rebuild_for<S>(
     store: &S,
     settings: &Settings,

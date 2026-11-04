@@ -70,7 +70,7 @@ the gap is visible rather than absorbed — but visible is not the same as corre
 ### `GET /price/{symbol}?country_code=US&asset_class=&max_age_seconds=`
 
 ```json
-{ "symbol": "AAPL", "venue": "US", "price": 343.83, "previous_close": 347.10, "change_pct": -0.9421,
+{ "symbol": "AAPL", "exchange": "US", "price": 343.83, "previous_close": 347.10, "change_pct": -0.9421,
   "bid": null, "ask": null,
   "provider": "eodhd", "fetched_at": "2026-10-29T04:34:16", "age_seconds": 0.4,
   "as_of": "2026-10-28T20:29:00", "as_of_age_seconds": 25424.3 }
@@ -79,11 +79,11 @@ the gap is visible rather than absorbed — but visible is not the same as corre
 404 `{"error": "unpriced", ...}` when nothing can price it.
 
 **Send the country — it is not optional.** `country_code` (US, AU) is required on every
-symbol-bearing call. `venue` (US, AU/ASX, L, TO, HK, F, PA) is an optional second spelling and
+symbol-bearing call. `exchange` (US, AU/ASX, L, TO, HK, F, PA) is an optional second spelling and
 must agree with it; a suffixed symbol (`CBA.AU`) is a third and must agree too. A ticker is
 not unique across markets — `CBA` is an ASX listing and a US one — and a request that names no
 country is refused with a 422 rather than answered from the US tape. A contradiction is 400
-`venue-conflict` rather than a preference for one.
+`exchange-conflict` rather than a preference for one.
 
 ### `POST /prices`
 
@@ -91,8 +91,8 @@ country is refused with a 422 rather than answered from the US tape. A contradic
 { "symbols": ["AAPL","MSFT"], "country_code": "US", "asset_class": null, "max_age_seconds": 300 }
 ```
 
-Answers with `quotes`, `venue`, `fetched`, `missing`, `deferred`, `route`, `complete`. One
-request is one market: a list whose symbols carry two different suffixes is 400 `mixed-venues`,
+Answers with `quotes`, `exchange`, `fetched`, `missing`, `deferred`, `route`, `complete`. One
+request is one market: a list whose symbols carry two different suffixes is 400 `mixed-exchanges`,
 so send one country per call.
 
 **`route` is the important field.** The service chooses bulk or per-symbol from the list length
@@ -134,7 +134,7 @@ is harmless but it hides the fact that the guarantee lives in the service.
 | Status | Meaning | What to do |
 |---|---|---|
 | 400 | bad request (incomplete stop, bad method, no symbols) | fix the call — it will not succeed on retry |
-| 400 `unknown-venue` / `venue-conflict` / `mixed-venues` | the market could not be resolved | fix the call: one country per request, and no suffix that contradicts it |
+| 400 `unknown-exchange` / `exchange-conflict` / `mixed-exchanges` | the market could not be resolved | fix the call: one country per request, and no suffix that contradicts it |
 | 422 | `country_code` missing or not `US`/`AU` | fix the call — the country is required, there is no default |
 | 404 | that symbol cannot be priced | mark it missing, move on |
 | 502 | the vendor refused | retry later, or fall back to the broker |
@@ -165,7 +165,7 @@ seconds returns immediately instead of hanging. Treat it as retryable rather tha
 6. **A country code is mandatory.** `CBA`, `BHP`, `BXB` are ASX tickers *and* US ones. Pass
    `country_code` (`US` or `AU`) on every symbol-bearing call; omitting it is a 422, not a US
    default. A suffix (`CBA.AU`) corroborates the country but does not replace it. A
-   contradiction is 400 `venue-conflict`, never a silent pick.
+   contradiction is 400 `exchange-conflict`, never a silent pick.
 
 ---
 

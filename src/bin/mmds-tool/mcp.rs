@@ -35,10 +35,10 @@ const CONVERSATION_TIMEOUT: Duration = Duration::from_secs(300);
 /// One request per tool, the same shapes the source tool checked.
 fn calls() -> [(&'static str, Value); 5] {
     [
-        ("get_price", json!({"symbol": "AAPL", "venue": "US"})),
+        ("get_price", json!({"symbol": "AAPL", "exchange": "US"})),
         (
             "get_prices",
-            json!({"symbols": ["AAPL", "MSFT"], "venue": "US"}),
+            json!({"symbols": ["AAPL", "MSFT"], "exchange": "US"}),
         ),
         ("get_atr", json!({"symbols": ["AAPL"], "period": 14})),
         ("get_bars", json!({"symbols": ["AAPL"], "sessions": 5})),
@@ -194,8 +194,8 @@ fn summary(name: &str, payload: &Value) -> String {
             show(payload, "price")
         ),
         "get_prices" => format!(
-            "venue={} route={} quotes={} missing={}",
-            show(payload, "venue"),
+            "exchange={} route={} quotes={} missing={}",
+            show(payload, "exchange"),
             show(payload, "route"),
             entries(payload, &["quotes"]).count(),
             show(payload, "missing")

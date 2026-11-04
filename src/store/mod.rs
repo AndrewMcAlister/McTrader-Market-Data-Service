@@ -13,7 +13,7 @@
 //!
 //! # Conventions
 //!
-//! * A read that says nothing about its venue means `US`. A write that says nothing is
+//! * A read that says nothing about its exchange means `US`. A write that says nothing is
 //!   refused: see [`keys`].
 //! * `decimal(18,6)` becomes `f64` at this boundary, once. Downstream code never sees
 //!   [`rust_decimal::Decimal`], and never invents a second rounding rule.

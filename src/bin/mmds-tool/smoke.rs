@@ -126,7 +126,7 @@ impl Smoke {
     }
 
     async fn prices(&mut self, symbols: &[&str]) {
-        let body = json!({"symbols": symbols, "country_code": "US", "venue": "US"});
+        let body = json!({"symbols": symbols, "country_code": "US", "exchange": "US"});
         if let Some(payload) = self.post("/prices", &body, "POST /prices").await {
             print_prices(&payload);
         }
@@ -237,8 +237,8 @@ fn print_quote(symbol: &str, quote: &Value) {
 
 fn print_prices(payload: &Value) {
     println!(
-        "  venue={} route={} requested={} count={} complete={} missing={}",
-        show(payload, "venue"),
+        "  exchange={} route={} requested={} count={} complete={} missing={}",
+        show(payload, "exchange"),
         show(payload, "route"),
         show(payload, "requested"),
         show(payload, "count"),
@@ -288,8 +288,8 @@ fn print_bars(payload: &Value) {
 
 fn print_atr(payload: &Value) {
     println!(
-        "  venue={} period={} method={} smoothing={} complete={}",
-        show(payload, "venue"),
+        "  exchange={} period={} method={} smoothing={} complete={}",
+        show(payload, "exchange"),
         show(payload, "period"),
         show(payload, "method"),
         show(payload, "smoothing"),
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn a_batch_summary_counts_the_quotes_it_received() {
         let payload = json!({
-            "venue": "US",
+            "exchange": "US",
             "route": "bulk",
             "requested": 2,
             "count": 2,

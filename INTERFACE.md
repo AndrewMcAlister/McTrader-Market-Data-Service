@@ -22,9 +22,10 @@ body field on `POST`. A missing country is `422` (`"type": "missing"`); an unkno
 alone does not name a market, and answering it from the US tape is exactly the silent wrong
 number this field exists to prevent.
 
-`venue` is an optional second spelling of the same fact, kept for older callers: `US`,
+`exchange` is an optional second spelling of the same fact, for a caller that already knows the
+provider's exchange code: `US`,
 `AU`/`ASX`/`AX`, `L`/`LSE`/`UK`, `TO`/`TSX`, `HK`, `F`/`DE`, `PA`. If stated it must agree with
-`country_code`; two spellings naming different markets is `400 venue-conflict`. A symbol may
+`country_code`; two spellings naming different markets is `400 exchange-conflict`. A symbol may
 also carry its market as a suffix (`CBA.AU`, `VOD.L`, `AAPL.US`), which must likewise agree
 with the stated country. A bare symbol takes the stated country.
 
@@ -32,7 +33,7 @@ All of these are valid and mean the ASX listing:
 
 ```json
 {"symbols": ["CBA"], "country_code": "AU"}
-{"symbols": ["CBA"], "country_code": "AU", "venue": "ASX"}
+{"symbols": ["CBA"], "country_code": "AU", "exchange": "ASX"}
 {"symbols": ["CBA.AU"], "country_code": "AU"}
 ```
 
@@ -40,13 +41,13 @@ The third still names the country: the suffix corroborates it, it does not repla
 `{"symbols": ["CBA.AU"]}` with no `country_code` is a `422`.
 
 **One request is one market**: a batch whose symbols carry two different suffixes is
-`400 mixed-venues`. Split it into two calls.
+`400 mixed-exchanges`. Split it into two calls.
 
-The market that was used comes back on every answer (`venue` on `/prices` and `/atr`,
+The market that was used comes back on every answer (`exchange` on `/prices` and `/atr`,
 per-symbol on `/bars`, and per-quote on `/price`), so a caller never has to assume which
 instrument a number belongs to. Crypto has no market: `asset_class: "crypto"` is cached under
 `CRYPTO`; the country is still required by the request shape but is ignored, and a stated
-`venue` is ignored with it.
+`exchange` is ignored with it.
 
 ---
 
@@ -59,20 +60,20 @@ Latest price for one symbol.
 | Name | Type | Default | Notes |
 |---|---|---|---|
 | `country_code` | string | **required** | `US` or `AU`. The market the ticker is in — `CBA` is both an ASX and a US listing. Missing or unknown is a 422 |
-| `venue` | string | none | Optional second spelling of the same fact: `US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`. Must agree with `country_code`. Ignored for crypto |
+| `exchange` | string | none | Optional second spelling of the same fact: `US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`. Must agree with `country_code`. Ignored for crypto |
 | `asset_class` | string | `shares` | `shares`, `crypto`, `indices`, `commodities`, `rates`, `forex`. Chooses the provider. |
 | `max_age_seconds` | float | `300` | **Lowers** the cache window; cannot raise it. |
 
-`country_code` is required: `GET /price/AAPL?country_code=US` is the shape. `venue` is
+`country_code` is required: `GET /price/AAPL?country_code=US` is the shape. `exchange` is
 optional and must agree with it; a disagreement — or a symbol suffix that contradicts it — is
-`400 venue-conflict`.
+`400 exchange-conflict`.
 
 **200 response**
 
 ```json
 {
   "symbol": "AAPL",
-  "venue": "US",
+  "exchange": "US",
   "price": 343.83,
   "previous_close": 347.10,
   "change_pct": -0.9421,
@@ -90,7 +91,7 @@ optional and must agree with it; a disagreement — or a symbol suffix that cont
 
 | Status | Body `error` | Meaning |
 |---|---|---|
-| 400 | `unknown-venue`, `venue-conflict` | the market could not be resolved — see §Choosing the market |
+| 400 | `unknown-exchange`, `exchange-conflict` | the market could not be resolved — see §Choosing the market |
 | 404 | `unpriced` | nothing could price it |
 | 422 | FastAPI-shaped `detail` | `country_code` missing or not `US`/`AU` |
 | 502 | vendor reason | the vendor refused |
@@ -114,20 +115,20 @@ separate endpoint.
 { "symbols": ["AAPL", "MSFT"], "country_code": "US", "asset_class": null, "max_age_seconds": 300 }
 ```
 
-`country_code` is required; `venue` is an optional spelling of the same fact and must agree
-with it (§Choosing the market). The market used is echoed as `venue` in the response.
+`country_code` is required; `exchange` is an optional spelling of the same fact and must agree
+with it (§Choosing the market). The market used is echoed as `exchange` in the response.
 
 **200 response**
 
 ```json
 {
   "quotes": {
-    "AAPL": { "symbol": "AAPL", "venue": "US", "price": 343.83, "previous_close": 347.10, "change_pct": -0.9421,
+    "AAPL": { "symbol": "AAPL", "exchange": "US", "price": 343.83, "previous_close": 347.10, "change_pct": -0.9421,
               "bid": null, "ask": null, "provider": "eodhd",
               "fetched_at": "2026-10-29T04:34:16", "age_seconds": 0.4,
               "as_of": "2026-10-28T20:29:00", "as_of_age_seconds": 25424.3 }
   },
-  "venue": "US",
+  "exchange": "US",
   "fetched": ["AAPL"],
   "missing": [],
   "deferred": [],
@@ -149,7 +150,7 @@ with it (§Choosing the market). The market used is echoed as `venue` in the res
 the whole US market. Below 100 symbols per-symbol is cheaper; at 100 or more, bulk wins by up to 100×.
 Send the list you need and let the service decide.
 
-**Errors:** 400 `no-symbols`, `unknown-venue`, `venue-conflict`, `mixed-venues`; 422
+**Errors:** 400 `no-symbols`, `unknown-exchange`, `exchange-conflict`, `mixed-exchanges`; 422
 `country_code` missing or unknown; 502 vendor; 503 `database-busy`.
 
 ---
@@ -178,7 +179,7 @@ else computed from daily bars.
 | Field | Default | Notes |
 |---|---|---|
 | `country_code` | **required** | `US` or `AU` — the market the series is measured on. See §Choosing the market |
-| `venue` | none | optional second spelling of the same fact; must agree with `country_code` |
+| `exchange` | none | optional second spelling of the same fact; must agree with `country_code` |
 | `period` | `14` | |
 | `method` | `tr` | `tr` = gap-inclusive true range (the standard); `high_low` = High−Low only |
 | `smoothing` | `simple` | `simple` = mean of the last N ranges (the standard); `wilder` |
@@ -199,7 +200,7 @@ else computed from daily bars.
       "stop_level": 337.64715
     }
   },
-  "venue": "US",
+  "exchange": "US",
   "period": 14, "method": "tr", "smoothing": "simple", "complete": true
 }
 ```
@@ -215,7 +216,7 @@ else computed from daily bars.
 
 `country_code` chooses the series the ATR is measured on: `IndicatorCache` is keyed by
 `(symbol, exchange)`, so an ASX `CBA` and a US `CBA` have separate ATRs and neither is served
-for the other. The market used is echoed as `venue` at the top of the response.
+for the other. The market used is echoed as `exchange` at the top of the response.
 
 **The ATR definition, exactly:**
 
@@ -225,7 +226,7 @@ ATR(n)  = sum(TR for the last n bars) / n
 ```
 
 **Errors:** 400 `bad-method`, `bad-smoothing`, `bad-period`, `incomplete-stop` (price without
-multiplier), `no-symbols`, `unknown-venue`, `venue-conflict`, `mixed-venues`; 422
+multiplier), `no-symbols`, `unknown-exchange`, `exchange-conflict`, `mixed-exchanges`; 422
 `country_code` missing or unknown; 502 vendor.
 
 ---
@@ -246,7 +247,7 @@ Completed daily bars.
 {
   "bars": {
     "AAPL": {
-      "symbol": "AAPL", "venue": "US",
+      "symbol": "AAPL", "exchange": "US",
       "as_of_session": "2026-10-28",
       "sessions": 15,
       "adjusted": true,
@@ -282,14 +283,14 @@ not what is kept. A later request for more sessions is then answered from the da
 of the vendor — which is what makes support and resistance levels computable.
 
 `country_code` chooses the series: the cache is keyed by `(symbol, exchange)`, so `AAPL`
-at `AU` is a different instrument from `AAPL` at `US`. A venue with a short series answers
-`short_history` rather than borrowing the other venue's bars.
+at `AU` is a different instrument from `AAPL` at `US`. An exchange with a short series answers
+`short_history` rather than borrowing the other exchange's bars.
 
 `allow_fetch: false` answers only from the database and never calls a vendor.
 
 **The session in progress is already excluded.** Do not filter it again downstream.
 
-**Errors:** 400 `bad-sessions`, `no-symbols`, `unknown-venue`, `venue-conflict`, `mixed-venues`;
+**Errors:** 400 `bad-sessions`, `no-symbols`, `unknown-exchange`, `exchange-conflict`, `mixed-exchanges`;
 422 `country_code` missing or unknown; 502 vendor.
 
 ---
@@ -321,7 +322,7 @@ ATR rebuild (~2,866 symbols). Pull-only is about 10 seconds.
 **does not double-spend**: a non-blocking lock makes the second concurrent caller `409 busy`.
 
 `expected_session` and `behind_expected` are the useful fields for monitoring. `expected_session` is
-what `data_service.sessions` says the venue's clock allows; `behind_expected: true` means the vendor
+what `data_service.sessions` says the exchange's clock allows; `behind_expected: true` means the vendor
 returned an older session, i.e. lag or a holiday — visible rather than silent.
 
 **Send `X-MarketData-Caller`.** The 100 units land in the spend ledger against it, which is the only
@@ -397,16 +398,16 @@ A provider that cannot serve an asset class is never asked — Binance is never 
 6. **Symbol format:** every request names its market with `country_code` (`US` or `AU`); the
    symbol may be bare (`AAPL`) or already-suffixed (`AAPL.US`). A suffix must agree with the
    stated country (`CBA.AU` with `country_code: "AU"` is ASX data; with `US` it is
-   `400 venue-conflict`), and a missing country is a `422` rather than a US default. Crypto
+   `400 exchange-conflict`), and a missing country is a `422` rather than a US default. Crypto
    pairs are bare or dashed (`BTC-USD`); the country is required but ignored for crypto.
 7. **Crypto needs `asset_class: "crypto"`**, or it is treated as a share and priced from the wrong feed.
 8. **Whole-market responses are large** (~12,700 rows, ~2 MB). If you only need the top movers, sort
    locally rather than shortening the list — a shorter list can drop below the 100-symbol break-even
    and become *more* expensive.
-9. **A ticker is not unique across venues.** `CBA` is both an ASX listing and a US one, so the market
+9. **A ticker is not unique across exchanges.** `CBA` is both an ASX listing and a US one, so the market
    is part of the instrument's identity, not a formatting hint: send `country_code`, and expect
-   `short_history` rather than another venue's bars when the requested venue has no series.
-   One request is one market: a batch with two different suffixes is `400 mixed-venues`.
+   `short_history` rather than another exchange's bars when the requested exchange has no series.
+   One request is one market: a batch with two different suffixes is `400 mixed-exchanges`.
 
 ---
 

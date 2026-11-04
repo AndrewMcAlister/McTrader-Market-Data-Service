@@ -1,6 +1,6 @@
 //! Key rules, stated once.
 //!
-//! * A read that says nothing about its venue means US, which is what the source service meant
+//! * A read that says nothing about its exchange means US, which is what the source service meant
 //!   and what the API defaults to. A *write* that says nothing is not a US row, it is an
 //!   unknown one — defaulting it is exactly how an ASX session came to be filed as US in the
 //!   first place. The database has no default on these columns either, so a writer that
@@ -20,7 +20,7 @@ pub fn read_exchange_key(value: Option<&str>) -> String {
 pub fn required_exchange_key(value: Option<&str>) -> Result<String, StoreError> {
     normalise(value).ok_or_else(|| {
         StoreError::invalid(
-            "a row must state its venue (Exchange); refusing to file an unknown venue as US",
+            "a row must state its exchange (Exchange); refusing to file an unknown exchange as US",
         )
     })
 }
@@ -55,17 +55,17 @@ mod tests {
     }
 
     #[test]
-    fn a_write_refuses_a_missing_venue_with_the_source_wording() {
+    fn a_write_refuses_a_missing_exchange_with_the_source_wording() {
         let error = required_exchange_key(None).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "invalid store row: a row must state its venue (Exchange); \
-             refusing to file an unknown venue as US"
+            "invalid store row: a row must state its exchange (Exchange); \
+             refusing to file an unknown exchange as US"
         );
     }
 
     #[test]
-    fn a_write_keeps_a_stated_venue() {
+    fn a_write_keeps_a_stated_exchange() {
         assert_eq!(required_exchange_key(Some("au")).unwrap(), "AU");
     }
 

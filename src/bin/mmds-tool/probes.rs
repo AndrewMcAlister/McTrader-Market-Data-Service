@@ -114,7 +114,7 @@ pub(crate) async fn probe_bulk_route(base: &str) -> ToolResult<()> {
     let reply = api
         .post(
             "/prices",
-            &json!({"symbols": symbols, "country_code": "US", "venue": "US"}),
+            &json!({"symbols": symbols, "country_code": "US", "exchange": "US"}),
             BULK_TIMEOUT,
         )
         .await?;

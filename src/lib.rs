@@ -2,7 +2,7 @@
 //!
 //! One library holds every rule the REST API, the daily job, the scheduler, the tools and the
 //! MCP proxy serve. The binaries in `src/bin` are thin entry points; nothing in them may
-//! reimplement a cache policy, an ATR definition or a venue rule.
+//! reimplement a cache policy, an ATR definition or an exchange rule.
 
 pub mod api;
 pub mod clock;

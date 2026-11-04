@@ -1,6 +1,6 @@
 //! The two "is there data for this country" endpoints.
 //!
-//! Both are gated by the same rule: a price must have been observed at or after the venue's
+//! Both are gated by the same rule: a price must have been observed at or after the exchange's
 //! most recent session open. `/todays-data-is-available` answers one boolean; `/todays-big-movers`
 //! refuses to rank on yesterday's cache and says so with an empty, 200 result rather than an
 //! error. That difference is the contract: "no data yet" is an answer a screener branches on,
@@ -38,14 +38,17 @@ pub async fn get_availability(
             return ApiError::database_unavailable().into_response();
         };
         let now = state.now_utc();
-        let Some(window) = state.market().availability_session(country.exchange, now) else {
+        let Some(window) = state
+            .market()
+            .availability_session(country.session_exchange, now)
+        else {
             return ApiError::internal(format!(
                 "{} is not in the clock reference",
-                country.exchange
+                country.session_exchange
             ))
             .into_response();
         };
-        let latest = match store.latest_venue_price(country.venue).await {
+        let latest = match store.latest_exchange_price(country.exchange).await {
             Ok(latest) => latest,
             Err(error) => {
                 // An unreadable store cannot vouch for data; false is the honest answer.
@@ -64,7 +67,7 @@ pub async fn get_availability(
 
         let mut headers = HeaderMap::new();
         set_header(&mut headers, "X-Dataset-Country", &result.country);
-        set_header(&mut headers, "X-Dataset-Venue", &result.venue);
+        set_header(&mut headers, "X-Dataset-Exchange", &result.exchange);
         set_header(
             &mut headers,
             "X-Dataset-Latest-Price",
@@ -128,14 +131,17 @@ pub async fn get_big_movers(
             return ApiError::database_unavailable().into_response();
         };
         let now = state.now_utc();
-        let Some(window) = state.market().availability_session(country.exchange, now) else {
+        let Some(window) = state
+            .market()
+            .availability_session(country.session_exchange, now)
+        else {
             return ApiError::internal(format!(
                 "{} is not in the clock reference",
-                country.exchange
+                country.session_exchange
             ))
             .into_response();
         };
-        let latest = match store.latest_venue_price(country.venue).await {
+        let latest = match store.latest_exchange_price(country.exchange).await {
             Ok(latest) => latest,
             Err(error) => {
                 tracing::warn!("todays-big-movers: could not read the price cache ({error})");
@@ -152,10 +158,10 @@ pub async fn get_big_movers(
         if !availability.available {
             return Json(json!({
                 "available": false,
-                "reason": "no price for this venue was observed at or after its most recent \
+                "reason": "no price for this exchange was observed at or after its most recent \
                            session open",
                 "country": availability.country,
-                "venue": availability.venue,
+                "exchange": availability.exchange,
                 "session": session,
                 "latest_price_utc": availability.latest_utc.map(crate::clock::iso_utc),
                 "winners": [],
@@ -166,7 +172,7 @@ pub async fn get_big_movers(
 
         let movers = match store
             .big_movers(
-                country.venue,
+                country.exchange,
                 query.limit,
                 query.min_price,
                 query.min_dollar_volume,
@@ -189,7 +195,7 @@ pub async fn get_big_movers(
         Json(json!({
             "available": true,
             "country": availability.country,
-            "venue": availability.venue,
+            "exchange": availability.exchange,
             "session": session,
             "latest_price_utc": availability.latest_utc.map(crate::clock::iso_utc),
             "filters": {

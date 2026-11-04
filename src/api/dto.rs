@@ -159,7 +159,7 @@ fn default_asset_class() -> String {
 pub struct PricesRequest {
     pub symbols: Vec<String>,
     #[serde(default)]
-    pub venue: Option<String>,
+    pub exchange: Option<String>,
     #[serde(default)]
     pub country_code: Option<String>,
     #[serde(default)]
@@ -179,7 +179,7 @@ pub struct AtrRequestBody {
     #[serde(default)]
     pub smoothing: Option<String>,
     #[serde(default)]
-    pub venue: Option<String>,
+    pub exchange: Option<String>,
     #[serde(default)]
     pub country_code: Option<String>,
     #[serde(default)]
@@ -199,7 +199,7 @@ pub struct BarsRequestBody {
     #[serde(default = "default_sessions")]
     pub sessions: i64,
     #[serde(default)]
-    pub venue: Option<String>,
+    pub exchange: Option<String>,
     #[serde(default)]
     pub country_code: Option<String>,
     #[serde(default = "default_true")]
@@ -242,7 +242,7 @@ impl Default for RefreshRequestBody {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PriceQuery {
     #[serde(default)]
-    pub venue: Option<String>,
+    pub exchange: Option<String>,
     #[serde(default)]
     pub country_code: Option<String>,
     #[serde(default)]
@@ -322,7 +322,7 @@ mod tests {
         let body: BarsRequestBody = serde_json::from_value(json!({"symbols": ["TSLA"]})).unwrap();
         assert_eq!(body.sessions, 15);
         assert!(body.allow_fetch);
-        assert!(body.venue.is_none());
+        assert!(body.exchange.is_none());
     }
 
     #[test]

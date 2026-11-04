@@ -7,6 +7,6 @@
 pub mod asset_class;
 pub mod atr;
 pub mod availability;
+pub mod exchanges;
 pub mod sessions;
 pub mod symbols;
-pub mod venues;

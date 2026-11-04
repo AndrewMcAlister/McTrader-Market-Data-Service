@@ -1,27 +1,27 @@
-//! Which session has finished, for the venue that was asked about.
+//! Which session has finished, for the exchange that was asked about.
 //!
 //! Every bar read is filtered so the session still in progress is never served: a partial
 //! range would shrink a stop exactly when the morning is quiet. The filter used to compare the
-//! session date against the **UTC** date, which is right for the one venue it was written for
-//! and wrong for every venue that closes earlier in UTC terms.
+//! session date against the **UTC** date, which is right for the one exchange it was written for
+//! and wrong for every exchange that closes earlier in UTC terms.
 //!
 //! The ASX is the case that bites. Its session closes at 16:00 Sydney — 05:00 or 06:00 UTC —
 //! and the UTC date then stays on that same day for a further 18 hours, so a session that had
 //! been closed all afternoon was refused as "in progress" until local midnight.
 //!
-//! So the rule is stated once, per venue: a session is complete once the clock at that venue
-//! has passed its close plus a settlement margin. Venues with no known close keep the old
+//! So the rule is stated once, per exchange: a session is complete once the clock at that exchange
+//! has passed its close plus a settlement margin. Exchanges with no known close keep the old
 //! answer — the *previous* UTC date — which can only ever be conservative.
 
 use chrono::{DateTime, Days, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
 
 use crate::domain::asset_class::CRYPTO_MARKET;
-use crate::domain::venues::normalise_venue_code;
+use crate::domain::exchanges::normalise_exchange_code;
 
-/// Venue -> (IANA zone, regular close), measured against the venue's own clock so a DST
+/// Exchange -> (IANA zone, regular close), measured against the exchange's own clock so a DST
 /// change moves the session rather than the rule.
-const VENUE_CLOSE: &[(&str, &str, (u32, u32))] = &[
+const EXCHANGE_CLOSE: &[(&str, &str, (u32, u32))] = &[
     ("US", "America/New_York", (16, 0)),
     ("AU", "Australia/Sydney", (16, 0)),
     ("L", "Europe/London", (16, 30)),
@@ -35,30 +35,31 @@ const VENUE_CLOSE: &[(&str, &str, (u32, u32))] = &[
 ///
 /// Three hours is not invented: it is the wait the UTC-date rule already imposed on the US,
 /// where midnight UTC falls three hours after the 16:00 ET close in summer and four in
-/// winter. Writing it down keeps the US answer where it was while letting every venue that
+/// winter. Writing it down keeps the US answer where it was while letting every exchange that
 /// closes earlier in UTC terms move to its own.
 pub const SETTLEMENT_HOURS: i64 = 3;
 
-/// Assets that have no venue and no close: their bars are UTC days, so the in-progress day is
+/// Assets that have no exchange and no close: their bars are UTC days, so the in-progress day is
 /// the current UTC date.
 const CRYPTO_CLASS: &str = "crypto";
 
-/// The market *venue* names for session purposes, or `""` when unknown.
+/// The market an exchange names for session purposes, or `""` when unknown.
 ///
-/// An unrecognised venue is not an error here: it yields `""` and the caller falls back to
-/// the UTC-date rule. Refusing the request is the venue normaliser's job, on the path that is
+/// An unrecognised exchange is not an error here: it yields `""` and the caller falls back to
+/// the UTC-date rule. Refusing the request is the exchange normaliser's job, on the path that is
 /// about to price something.
-pub fn market_code(venue: Option<&str>, asset_class: Option<&str>) -> String {
+pub fn market_code(exchange: Option<&str>, asset_class: Option<&str>) -> String {
     let kind = asset_class.unwrap_or("").trim().to_lowercase();
     if kind == CRYPTO_CLASS {
         return CRYPTO_MARKET.to_string();
     }
-    normalise_venue_code(venue).unwrap_or_default()
+    normalise_exchange_code(exchange).unwrap_or_default()
 }
 
 /// The close rule for a market, or `None` when it has no known close.
-fn venue_close(market: &str) -> Option<(Tz, NaiveTime)> {
-    let (_, zone_name, (hour, minute)) = VENUE_CLOSE.iter().find(|(code, _, _)| *code == market)?;
+fn exchange_close(market: &str) -> Option<(Tz, NaiveTime)> {
+    let (_, zone_name, (hour, minute)) =
+        EXCHANGE_CLOSE.iter().find(|(code, _, _)| *code == market)?;
     let zone: Tz = zone_name.parse().ok()?;
     let close = NaiveTime::from_hms_opt(*hour, *minute, 0)?;
     Some((zone, close))
@@ -66,7 +67,7 @@ fn venue_close(market: &str) -> Option<(Tz, NaiveTime)> {
 
 /// The newest session date that has finished and settled at `market`.
 ///
-/// A session dated *D* counts once the venue's clock has reached close + [`SETTLEMENT_HOURS`]
+/// A session dated *D* counts once the exchange's clock has reached close + [`SETTLEMENT_HOURS`]
 /// on *D*. Before that, the newest completed session is the previous local date — a calendar
 /// day, so a holiday simply has no rows and costs nothing.
 ///
@@ -74,7 +75,7 @@ fn venue_close(market: &str) -> Option<(Tz, NaiveTime)> {
 /// caller compares `session <= answer`, and today's UTC date is still trading somewhere.
 pub fn latest_completed_session(market: Option<&str>, now: DateTime<Utc>) -> NaiveDate {
     let key = market.unwrap_or("").trim().to_uppercase();
-    let Some((zone, close)) = venue_close(&key) else {
+    let Some((zone, close)) = exchange_close(&key) else {
         return now.date_naive() - Days::new(1);
     };
 
@@ -88,15 +89,15 @@ pub fn latest_completed_session(market: Option<&str>, now: DateTime<Utc>) -> Nai
 
     match settled {
         Some(settled_at) if local >= settled_at => local_date,
-        // The close time is not in a DST gap for any venue in the table, but if a future
+        // The close time is not in a DST gap for any exchange in the table, but if a future
         // zone database ever makes it one, answering conservatively is the safe failure.
         _ => local_date - Days::new(1),
     }
 }
 
-/// The venue close table, for diagnostics and tests.
-pub fn venue_closes() -> impl Iterator<Item = (&'static str, &'static str, (u32, u32))> {
-    VENUE_CLOSE
+/// The exchange close table, for diagnostics and tests.
+pub fn exchange_closes() -> impl Iterator<Item = (&'static str, &'static str, (u32, u32))> {
+    EXCHANGE_CLOSE
         .iter()
         .map(|(code, zone, close)| (*code, *zone, *close))
 }
@@ -187,7 +188,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_venue_answers_with_the_previous_utc_date() {
+    fn an_unknown_exchange_answers_with_the_previous_utc_date() {
         assert_eq!(
             latest_completed_session(Some("ZZ"), utc(2026, 10, 29, 9)),
             NaiveDate::from_ymd_opt(2026, 10, 28).unwrap()
@@ -211,22 +212,22 @@ mod tests {
     }
 
     #[test]
-    fn the_market_code_resolves_a_venue_name() {
+    fn the_market_code_resolves_a_exchange_name() {
         assert_eq!(market_code(Some("ASX"), None), "AU");
         assert_eq!(market_code(Some("NASDAQ"), None), "US");
         assert_eq!(market_code(Some("us"), None), "US");
     }
 
     #[test]
-    fn crypto_is_its_own_market_whatever_venue_was_passed() {
+    fn crypto_is_its_own_market_whatever_exchange_was_passed() {
         assert_eq!(market_code(Some("US"), Some("crypto")), "CRYPTO");
         assert_eq!(market_code(None, Some("CRYPTO")), "CRYPTO");
     }
 
     #[test]
-    fn an_unknown_venue_yields_no_market_rather_than_raising() {
+    fn an_unknown_exchange_yields_no_market_rather_than_raising() {
         assert_eq!(market_code(Some("NOWHERE"), None), "");
-        // A blank venue is the house default, exactly as `normalise_venue(None)`.
+        // A blank exchange is the house default, exactly as `normalise_exchange(None)`.
         assert_eq!(market_code(None, None), "US");
     }
 }

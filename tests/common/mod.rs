@@ -206,29 +206,29 @@ impl FakeStore {
         self.state().indicator_writes.clone()
     }
 
-    pub fn has_price(&self, symbol: &str, venue: &str) -> bool {
+    pub fn has_price(&self, symbol: &str, exchange: &str) -> bool {
         self.state()
             .prices
-            .contains_key(&(symbol.to_string(), venue.to_string()))
+            .contains_key(&(symbol.to_string(), exchange.to_string()))
     }
 
     /// Age a cached price, so a caller's lower TTL can be shown to matter.
-    pub fn backdate_price(&self, symbol: &str, venue: &str, fetched_at: NaiveDateTime) {
+    pub fn backdate_price(&self, symbol: &str, exchange: &str, fetched_at: NaiveDateTime) {
         let mut state = self.state();
         if let Some(row) = state
             .prices
-            .get_mut(&(symbol.to_string(), venue.to_string()))
+            .get_mut(&(symbol.to_string(), exchange.to_string()))
         {
             row.fetched_at = Some(fetched_at);
         }
     }
 
-    /// Age every price at a venue, which leaves them stale while the in-memory whole-market
+    /// Age every price at an exchange, which leaves them stale while the in-memory whole-market
     /// snapshot is still inside its own lifetime.
-    pub fn backdate_venue_prices(&self, venue: &str, fetched_at: NaiveDateTime) {
+    pub fn backdate_exchange_prices(&self, exchange: &str, fetched_at: NaiveDateTime) {
         let mut state = self.state();
-        for ((_, row_venue), row) in state.prices.iter_mut() {
-            if row_venue == venue {
+        for ((_, row_exchange), row) in state.prices.iter_mut() {
+            if row_exchange == exchange {
                 row.fetched_at = Some(fetched_at);
             }
         }
@@ -287,7 +287,7 @@ impl FakeStore {
             .and_then(|bucket| bucket.keys().next_back().copied())
     }
 
-    /// The venues a symbol's daily rows were filed under.
+    /// The exchanges a symbol's daily rows were filed under.
     pub fn daily_exchanges(&self, symbol: &str) -> Vec<String> {
         let state = self.state();
         let mut exchanges: Vec<String> = state
@@ -314,7 +314,7 @@ impl FakeStore {
         }
     }
 
-    /// The venue the latest indicator write for a symbol carried.
+    /// The exchange the latest indicator write for a symbol carried.
     pub fn indicator_exchange(&self, symbol: &str) -> Option<String> {
         self.state()
             .indicator_writes
@@ -354,7 +354,7 @@ fn stored_bar(row: &DailyBarWrite) -> StoredBar {
 fn cached_price(row: &PriceRow) -> CachedPrice {
     CachedPrice {
         symbol: row.symbol.clone(),
-        venue: row.venue.clone().unwrap_or_default(),
+        exchange: row.exchange.clone().unwrap_or_default(),
         price: Some(row.price),
         bid: row.bid,
         ask: row.ask,
@@ -371,12 +371,12 @@ impl PriceRepository for FakeStore {
     async fn get_prices(
         &self,
         symbols: &[String],
-        venue: &str,
+        exchange: &str,
     ) -> Result<HashMap<String, CachedPrice>, StoreError> {
         let state = self.state();
         let mut out = HashMap::with_capacity(symbols.len());
         for symbol in symbols {
-            let key = (symbol.trim().to_uppercase(), venue.to_string());
+            let key = (symbol.trim().to_uppercase(), exchange.to_string());
             if let Some(row) = state.prices.get(&key) {
                 out.insert(key.0, cached_price(row));
             }
@@ -388,8 +388,8 @@ impl PriceRepository for FakeStore {
         let mut state = self.state();
         let written = rows.len();
         for row in rows {
-            let venue = row.venue.clone().unwrap_or_default();
-            state.prices.insert((row.symbol.clone(), venue), row);
+            let exchange = row.exchange.clone().unwrap_or_default();
+            state.prices.insert((row.symbol.clone(), exchange), row);
         }
         state.price_writes += written;
         Ok(written)
@@ -397,7 +397,7 @@ impl PriceRepository for FakeStore {
 
     async fn big_movers(
         &self,
-        _venue: &str,
+        _exchange: &str,
         _limit: i64,
         _min_price: f64,
         _min_dollar_volume: f64,
@@ -406,19 +406,22 @@ impl PriceRepository for FakeStore {
         Ok(Movers::default())
     }
 
-    async fn latest_venue_price(&self, venue: &str) -> Result<Option<NaiveDateTime>, StoreError> {
+    async fn latest_exchange_price(
+        &self,
+        exchange: &str,
+    ) -> Result<Option<NaiveDateTime>, StoreError> {
         let state = self.state();
         Ok(state
             .prices
             .iter()
-            .filter(|((_, row_venue), _)| row_venue == venue)
+            .filter(|((_, row_exchange), _)| row_exchange == exchange)
             .filter_map(|(_, row)| row.fetched_at)
             .max())
     }
 
     async fn top_symbols_by_dollar_volume(
         &self,
-        _venue: &str,
+        _exchange: &str,
         _limit: i64,
         _min_breadth: i64,
     ) -> Result<Vec<String>, StoreError> {
@@ -795,7 +798,7 @@ impl Provider for FakeProvider {
         &self,
         symbol: &str,
         _asset_class: AssetClass,
-        _venue: Option<&str>,
+        _exchange: Option<&str>,
     ) -> Result<Option<ProviderQuote>, ProviderFailure> {
         self.quote_calls.fetch_add(1, Ordering::Relaxed);
         if self.quote_failure.load(Ordering::Relaxed) {
@@ -818,7 +821,7 @@ impl Provider for FakeProvider {
         _symbol: &str,
         _asset_class: AssetClass,
         sessions: usize,
-        _venue: Option<&str>,
+        _exchange: Option<&str>,
     ) -> Result<Vec<ProviderBar>, ProviderFailure> {
         self.bars_calls.fetch_add(1, Ordering::Relaxed);
         self.bars_widths
@@ -836,7 +839,7 @@ impl Provider for FakeProvider {
 impl WholeMarketQuotes for FakeProvider {
     async fn whole_market_quotes(
         &self,
-        _venue: Option<&str>,
+        _exchange: Option<&str>,
     ) -> Result<Vec<ProviderQuote>, ProviderFailure> {
         self.whole_market_calls.fetch_add(1, Ordering::Relaxed);
         Ok(self

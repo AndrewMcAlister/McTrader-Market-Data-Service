@@ -39,7 +39,7 @@ pub async fn get_price(
         products
             .price(
                 &symbol,
-                query.venue.as_deref(),
+                query.exchange.as_deref(),
                 query.max_age_seconds,
                 query.asset_class.as_deref(),
                 Some(country.key),
@@ -74,7 +74,7 @@ pub async fn post_prices(
         products
             .prices(
                 &body.symbols,
-                body.venue.as_deref(),
+                body.exchange.as_deref(),
                 body.max_age_seconds,
                 body.asset_class.as_deref(),
                 Some(country.key),
@@ -112,7 +112,7 @@ pub async fn post_atr(
                 period: body.period,
                 method: body.method.as_deref(),
                 smoothing: body.smoothing.as_deref(),
-                venue: body.venue.as_deref(),
+                exchange: body.exchange.as_deref(),
                 price: body.price,
                 multiplier: body.multiplier,
                 direction: body.direction.as_deref().unwrap_or("long"),
@@ -154,7 +154,7 @@ pub async fn post_bars(
             .bars(
                 &body.symbols,
                 body.sessions,
-                body.venue.as_deref(),
+                body.exchange.as_deref(),
                 body.allow_fetch,
                 body.asset_class.as_deref(),
                 Some(country.key),

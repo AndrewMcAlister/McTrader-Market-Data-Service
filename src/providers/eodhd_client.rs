@@ -36,14 +36,14 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::config::EODHD_BASE_URL;
-use crate::domain::venues::normalise_venue_code;
+use crate::domain::exchanges::normalise_exchange_code;
 use crate::error::{py_repr, ProviderFailure};
 use crate::providers::base::truncate_chars;
 use crate::usage::{request_type_for, UsageRecorder};
 
-/// The only venue the whole-market real-time feed was measured for. A request for BHP.AU
-/// returns nothing from it, so other venues are refused rather than priced off a US tape.
-pub const BULK_REAL_TIME_VENUE: &str = "US";
+/// The only exchange the whole-market real-time feed was measured for. A request for BHP.AU
+/// returns nothing from it, so other exchanges are refused rather than priced off a US tape.
+pub const BULK_REAL_TIME_EXCHANGE: &str = "US";
 
 /// The path ticker for the `ex=` form. EODHD ignores it once `ex` is set; it is present
 /// because the path is not optional. Fixed, so no caller's symbol can end up in it.
@@ -312,9 +312,9 @@ impl EodhdClient {
     pub async fn real_time(
         &self,
         symbol: &str,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Result<Value, ProviderFailure> {
-        let ticker = render_symbol(symbol, venue)?;
+        let ticker = render_symbol(symbol, exchange)?;
         let payload = self
             .get_json(
                 &format!("real-time/{ticker}"),
@@ -348,23 +348,26 @@ impl EodhdClient {
     /// Returns the raw rows unfiltered: the feed carries inactive and delisted symbols
     /// holding the last price they ever traded at, and deciding what is too old is a policy
     /// call that belongs to the caller, where the freshness rule is known.
-    pub async fn real_time_whole_market(&self, venue: &str) -> Result<Vec<Value>, ProviderFailure> {
-        let market = normalise_venue(Some(venue))?;
-        if market != BULK_REAL_TIME_VENUE {
+    pub async fn real_time_whole_market(
+        &self,
+        exchange: &str,
+    ) -> Result<Vec<Value>, ProviderFailure> {
+        let market = normalise_exchange(Some(exchange))?;
+        if market != BULK_REAL_TIME_EXCHANGE {
             return Err(ProviderFailure::new(
-                "non-us-venue",
+                "non-us-exchange",
                 format!(
-                    "the whole-market real-time feed was measured for {BULK_REAL_TIME_VENUE} \
+                    "the whole-market real-time feed was measured for {BULK_REAL_TIME_EXCHANGE} \
                      only; {} is refused rather than priced off a US tape",
-                    py_repr(venue)
+                    py_repr(exchange)
                 ),
                 None,
             ));
         }
         let payload = self
             .get_json(
-                &format!("real-time/{BULK_PLACEHOLDER}.{BULK_REAL_TIME_VENUE}"),
-                &[("ex".to_string(), BULK_REAL_TIME_VENUE.to_string())],
+                &format!("real-time/{BULK_PLACEHOLDER}.{BULK_REAL_TIME_EXCHANGE}"),
+                &[("ex".to_string(), BULK_REAL_TIME_EXCHANGE.to_string())],
                 Billing::new("real_time_bulk", 100, 0),
                 self.bulk_timeout,
             )
@@ -379,11 +382,11 @@ impl EodhdClient {
     pub async fn eod(
         &self,
         symbol: &str,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         days: i64,
         to_date: Option<NaiveDate>,
     ) -> Result<Vec<Value>, ProviderFailure> {
-        let ticker = render_symbol(symbol, venue)?;
+        let ticker = render_symbol(symbol, exchange)?;
         let end = to_date.unwrap_or_else(|| Local::now().date_naive());
         let start = end
             .checked_sub_days(Days::new(days.max(1) as u64))
@@ -413,12 +416,12 @@ impl EodhdClient {
     pub async fn intraday(
         &self,
         symbol: &str,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         interval: &str,
         start: i64,
         end: i64,
     ) -> Result<Vec<Value>, ProviderFailure> {
-        let ticker = render_symbol(symbol, venue)?;
+        let ticker = render_symbol(symbol, exchange)?;
         let now = Utc::now().timestamp();
         let end = if end == 0 { now } else { end };
         if start == 0 {
@@ -465,7 +468,7 @@ impl EodhdClient {
         market: &str,
         session_date: Option<NaiveDate>,
     ) -> Result<Vec<Value>, ProviderFailure> {
-        let market = normalise_venue(Some(market))?;
+        let market = normalise_exchange(Some(market))?;
         let mut params = Vec::with_capacity(1);
         if let Some(date) = session_date {
             params.push(("date".to_string(), date.format("%Y-%m-%d").to_string()));
@@ -518,19 +521,23 @@ impl<'a> Billing<'a> {
 /// which would make a pure mapping test depend on the network layer's retry policy.
 #[async_trait::async_trait]
 pub trait EodhdApi: Send + Sync {
-    async fn real_time(&self, symbol: &str, venue: Option<&str>) -> Result<Value, ProviderFailure>;
-    async fn real_time_whole_market(&self, venue: &str) -> Result<Vec<Value>, ProviderFailure>;
+    async fn real_time(
+        &self,
+        symbol: &str,
+        exchange: Option<&str>,
+    ) -> Result<Value, ProviderFailure>;
+    async fn real_time_whole_market(&self, exchange: &str) -> Result<Vec<Value>, ProviderFailure>;
     async fn eod(
         &self,
         symbol: &str,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         days: i64,
         to_date: Option<NaiveDate>,
     ) -> Result<Vec<Value>, ProviderFailure>;
     async fn intraday(
         &self,
         symbol: &str,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         interval: &str,
         start: i64,
         end: i64,
@@ -544,33 +551,37 @@ pub trait EodhdApi: Send + Sync {
 
 #[async_trait::async_trait]
 impl EodhdApi for EodhdClient {
-    async fn real_time(&self, symbol: &str, venue: Option<&str>) -> Result<Value, ProviderFailure> {
-        EodhdClient::real_time(self, symbol, venue).await
+    async fn real_time(
+        &self,
+        symbol: &str,
+        exchange: Option<&str>,
+    ) -> Result<Value, ProviderFailure> {
+        EodhdClient::real_time(self, symbol, exchange).await
     }
 
-    async fn real_time_whole_market(&self, venue: &str) -> Result<Vec<Value>, ProviderFailure> {
-        EodhdClient::real_time_whole_market(self, venue).await
+    async fn real_time_whole_market(&self, exchange: &str) -> Result<Vec<Value>, ProviderFailure> {
+        EodhdClient::real_time_whole_market(self, exchange).await
     }
 
     async fn eod(
         &self,
         symbol: &str,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         days: i64,
         to_date: Option<NaiveDate>,
     ) -> Result<Vec<Value>, ProviderFailure> {
-        EodhdClient::eod(self, symbol, venue, days, to_date).await
+        EodhdClient::eod(self, symbol, exchange, days, to_date).await
     }
 
     async fn intraday(
         &self,
         symbol: &str,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         interval: &str,
         start: i64,
         end: i64,
     ) -> Result<Vec<Value>, ProviderFailure> {
-        EodhdClient::intraday(self, symbol, venue, interval, start, end).await
+        EodhdClient::intraday(self, symbol, exchange, interval, start, end).await
     }
 
     async fn bulk_last_day(
@@ -594,17 +605,17 @@ pub fn retry_after_seconds(retry_after: Option<&str>, attempt: u32) -> f64 {
     2_f64.powi(attempt.saturating_sub(1) as i32).min(30.0)
 }
 
-/// The EODHD venue code for a venue name, or an error.
+/// The EODHD exchange code for an exchange name, or an error.
 ///
-/// Refusing an unknown venue rather than defaulting to US is deliberate: silently pricing an
+/// Refusing an unknown exchange rather than defaulting to US is deliberate: silently pricing an
 /// Australian listing from the US feed produces a wrong number that looks right, which is
 /// worse than an error. A blank value means the house default, `US`.
-pub fn normalise_venue(text: Option<&str>) -> Result<String, ProviderFailure> {
-    normalise_venue_code(text).ok_or_else(|| {
+pub fn normalise_exchange(text: Option<&str>) -> Result<String, ProviderFailure> {
+    normalise_exchange_code(text).ok_or_else(|| {
         ProviderFailure::new(
-            "unknown-venue",
+            "unknown-exchange",
             format!(
-                "{} is not a known venue; pass one of US, AU, L, TO, HK, F, PA, ...",
+                "{} is not a known exchange; pass one of US, AU, L, TO, HK, F, PA, ...",
                 match text {
                     Some(value) => py_repr(value),
                     None => "None".to_string(),
@@ -617,9 +628,9 @@ pub fn normalise_venue(text: Option<&str>) -> Result<String, ProviderFailure> {
 
 /// `("AAPL", "US") -> "AAPL.US"`; an already-suffixed symbol is left alone.
 ///
-/// Only a suffix that matches a known venue is treated as one, so a genuinely dotted ticker
-/// (`BRK.B`) is not mistaken for a venue-qualified code.
-pub fn render_symbol(symbol: &str, venue: Option<&str>) -> Result<String, ProviderFailure> {
+/// Only a suffix that matches a known exchange is treated as one, so a genuinely dotted ticker
+/// (`BRK.B`) is not mistaken for an exchange-qualified code.
+pub fn render_symbol(symbol: &str, exchange: Option<&str>) -> Result<String, ProviderFailure> {
     let text = symbol.trim().to_uppercase();
     if text.is_empty() {
         return Err(ProviderFailure::new(
@@ -630,12 +641,12 @@ pub fn render_symbol(symbol: &str, venue: Option<&str>) -> Result<String, Provid
     }
     if let Some((root, tail)) = text.rsplit_once('.') {
         if !root.is_empty() && !tail.is_empty() {
-            if let Some(mapped) = normalise_venue_code(Some(tail)) {
+            if let Some(mapped) = normalise_exchange_code(Some(tail)) {
                 return Ok(format!("{root}.{mapped}"));
             }
         }
     }
-    Ok(format!("{text}.{}", normalise_venue(venue)?))
+    Ok(format!("{text}.{}", normalise_exchange(exchange)?))
 }
 
 /// `"AAPL.US" -> "AAPL"`. Used to key the bulk feed's rows.
@@ -730,31 +741,31 @@ mod tests {
     }
 
     #[test]
-    fn venue_aliases_resolve_to_eodhd_codes() {
-        assert_eq!(normalise_venue(Some("US")).unwrap(), "US");
-        assert_eq!(normalise_venue(Some("NASDAQ")).unwrap(), "US");
-        assert_eq!(normalise_venue(Some("ASX")).unwrap(), "AU");
-        assert_eq!(normalise_venue(Some("AU")).unwrap(), "AU");
-        assert_eq!(normalise_venue(Some("LSE")).unwrap(), "L");
-        assert_eq!(normalise_venue(Some("UK")).unwrap(), "L");
-        assert_eq!(normalise_venue(Some("TSX")).unwrap(), "TO");
-        assert_eq!(normalise_venue(Some("XETRA")).unwrap(), "F");
+    fn exchange_aliases_resolve_to_eodhd_codes() {
+        assert_eq!(normalise_exchange(Some("US")).unwrap(), "US");
+        assert_eq!(normalise_exchange(Some("NASDAQ")).unwrap(), "US");
+        assert_eq!(normalise_exchange(Some("ASX")).unwrap(), "AU");
+        assert_eq!(normalise_exchange(Some("AU")).unwrap(), "AU");
+        assert_eq!(normalise_exchange(Some("LSE")).unwrap(), "L");
+        assert_eq!(normalise_exchange(Some("UK")).unwrap(), "L");
+        assert_eq!(normalise_exchange(Some("TSX")).unwrap(), "TO");
+        assert_eq!(normalise_exchange(Some("XETRA")).unwrap(), "F");
     }
 
     #[test]
-    fn a_blank_venue_defaults_to_us() {
-        assert_eq!(normalise_venue(Some("")).unwrap(), "US");
-        assert_eq!(normalise_venue(None).unwrap(), "US");
+    fn a_blank_exchange_defaults_to_us() {
+        assert_eq!(normalise_exchange(Some("")).unwrap(), "US");
+        assert_eq!(normalise_exchange(None).unwrap(), "US");
     }
 
     #[test]
-    fn an_unknown_venue_is_refused_rather_than_defaulted() {
-        let error = normalise_venue(Some("MARS")).unwrap_err();
-        assert_eq!(error.reason, "unknown-venue");
+    fn an_unknown_exchange_is_refused_rather_than_defaulted() {
+        let error = normalise_exchange(Some("MARS")).unwrap_err();
+        assert_eq!(error.reason, "unknown-exchange");
     }
 
     #[test]
-    fn a_bare_symbol_gets_the_requested_venue() {
+    fn a_bare_symbol_gets_the_requested_exchange() {
         assert_eq!(render_symbol("AAPL", Some("US")).unwrap(), "AAPL.US");
         assert_eq!(render_symbol("cba", Some("AU")).unwrap(), "CBA.AU");
     }
@@ -766,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dotted_ticker_is_not_mistaken_for_a_venue() {
+    fn a_dotted_ticker_is_not_mistaken_for_a_exchange() {
         assert_eq!(render_symbol("BRK.B", Some("US")).unwrap(), "BRK.B.US");
     }
 
@@ -799,7 +810,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn intraday_asks_with_epoch_seconds_and_the_venue_suffix() {
+    async fn intraday_asks_with_epoch_seconds_and_the_exchange_suffix() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/intraday/BHP.AU"))

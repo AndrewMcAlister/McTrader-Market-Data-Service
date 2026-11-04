@@ -205,7 +205,7 @@ async fn the_bulk_snapshot_is_reused_inside_its_own_lifetime() {
         .unwrap();
 
     let aged = clock.now_utc().naive_utc() - Duration::seconds(400);
-    store.backdate_venue_prices("US", aged);
+    store.backdate_exchange_prices("US", aged);
 
     let result = products
         .prices(&wanted, None, None, None, None)
@@ -409,7 +409,7 @@ async fn a_cached_series_that_stops_before_the_completed_session_is_refreshed() 
         .unwrap();
     assert_eq!(provider.bars_calls(), 1);
 
-    // The venue has completed another session and the vendor has since published it.
+    // The exchange has completed another session and the vendor has since published it.
     clock.advance_days(1);
     provider.set_newest(date(2026, 10, 30));
 
@@ -629,7 +629,7 @@ async fn a_bad_direction_is_a_reason_not_a_500() {
 
 #[tokio::test]
 async fn the_minimal_request_is_atr_14_with_the_default_definition() {
-    // {"symbols": ["AAPL"]} is the whole request: period 14, tr, simple, venue US.
+    // {"symbols": ["AAPL"]} is the whole request: period 14, tr, simple, exchange US.
     let (products, _, _, _) = setup().await;
     let wanted = symbols(&["AAPL"]);
 
@@ -638,7 +638,7 @@ async fn the_minimal_request_is_atr_14_with_the_default_definition() {
     assert_eq!(result.period, 14);
     assert_eq!(result.method, "tr");
     assert_eq!(result.smoothing, "simple");
-    assert_eq!(result.venue, "US");
+    assert_eq!(result.exchange, "US");
     assert_eq!(result.atr["AAPL"].period, 14);
 }
 
@@ -674,7 +674,7 @@ async fn the_response_always_states_the_definition_it_used() {
 }
 
 // ---------------------------------------------------------------------------
-// the market: venue, country_code, or the symbol's own suffix
+// the market: exchange, country_code, or the symbol's own suffix
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -686,15 +686,15 @@ async fn a_country_code_picks_the_market_the_price_is_cached_under() {
         .await
         .unwrap();
 
-    assert_eq!(result.venue, "AU");
+    assert_eq!(result.exchange, "AU");
     assert!(store.has_price("CBA", "AU"));
     assert!(!store.has_price("CBA", "US"));
-    assert_eq!(result.quotes["CBA"].venue.as_deref(), Some("AU"));
+    assert_eq!(result.quotes["CBA"].exchange.as_deref(), Some("AU"));
 }
 
 #[tokio::test]
-async fn a_suffixed_symbol_states_its_own_market_when_no_venue_does() {
-    // `CBA.AU` used to be stripped and priced at venue US: the suffix was decoration.
+async fn a_suffixed_symbol_states_its_own_market_when_no_exchange_does() {
+    // `CBA.AU` used to be stripped and priced at exchange US: the suffix was decoration.
     let (products, _, store, _) = setup().await;
 
     products
@@ -717,7 +717,7 @@ async fn a_stated_market_and_a_contradicting_suffix_are_refused_before_any_spend
             .unwrap_err(),
     );
 
-    assert_eq!(error.reason, "venue-conflict");
+    assert_eq!(error.reason, "exchange-conflict");
     assert_eq!(error.status, 400);
     assert_eq!(provider.quote_calls(), 0);
 }
@@ -731,7 +731,7 @@ async fn bars_honour_a_country_code_and_file_the_rows_under_it() {
         .await
         .unwrap();
 
-    assert_eq!(payload.bars["CBA"].venue, "AU");
+    assert_eq!(payload.bars["CBA"].exchange, "AU");
     assert_eq!(store.daily_exchanges("CBA"), vec!["AU".to_string()]);
 }
 
@@ -744,7 +744,7 @@ async fn atr_at_a_country_code_is_cached_under_that_market() {
 
     let result = products.atr_batch(request).await.unwrap();
 
-    assert_eq!(result.venue, "AU");
+    assert_eq!(result.exchange, "AU");
     assert!(result.atr["CBA"].value.is_some());
     // The write carries the market: without it the next AU request reads a US ATR.
     assert_eq!(store.indicator_exchange("CBA").as_deref(), Some("AU"));

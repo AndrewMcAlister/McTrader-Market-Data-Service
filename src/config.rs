@@ -27,7 +27,7 @@ pub const DEFAULT_PRICE_TTL_SECONDS: f64 = 300.0;
 /// tariff is 1 unit per symbol against 100 flat, so 100 is the exact break-even.
 pub const DEFAULT_BULK_BREAKEVEN: i64 = 100;
 
-/// How many symbols the scheduler prices one by one for a venue with no whole-market
+/// How many symbols the scheduler prices one by one for an exchange with no whole-market
 /// real-time feed — the ASX today. One vendor unit each.
 pub const DEFAULT_SCHEDULE_PRICE_UNIVERSE: i64 = 100;
 

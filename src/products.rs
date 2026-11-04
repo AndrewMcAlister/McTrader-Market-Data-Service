@@ -35,8 +35,8 @@ use crate::clock::{iso_naive, now_naive, seconds_between, Clock};
 use crate::config::Settings;
 use crate::domain::asset_class::AssetClass;
 use crate::domain::atr;
+use crate::domain::exchanges::resolve_exchange;
 use crate::domain::sessions::latest_completed_session;
-use crate::domain::venues::resolve_venue;
 use crate::error::{py_repr, MarketDataError, ProviderFailure};
 use crate::presence::Presence;
 use crate::providers::base::{ProviderBar, ProviderQuote};
@@ -63,7 +63,7 @@ pub const BULK_SNAPSHOT_TTL_SECONDS: f64 = 120.0;
 /// again. A vendor publishes a session some time after it closes, so the first caller past the
 /// settle window often finds nothing new; without a retry that one early answer would hold
 /// every later caller in the same session back until the next close. An hour bounds the cost
-/// of a day the venue does not trade — one call per symbol per hour — while still catching the
+/// of a day the exchange does not trade — one call per symbol per hour — while still catching the
 /// publication an hour after it happens.
 pub const BARS_REFRESH_TTL_SECONDS: f64 = 3600.0;
 
@@ -230,9 +230,9 @@ impl From<crate::refresh::RefreshFailure> for ProductError {
 
 /// The request's symbols, bare and de-duplicated, in the order they arrived.
 ///
-/// A suffix is stripped because the venue is served separately — and the venue has already
-/// been read off that suffix by [`resolve_venue`], so dropping it here loses nothing. Crypto
-/// keeps its pair as sent: `BTC-USD` has no venue suffix to strip and `BTC` alone is a
+/// A suffix is stripped because the exchange is served separately — and the exchange has already
+/// been read off that suffix by [`resolve_exchange`], so dropping it here loses nothing. Crypto
+/// keeps its pair as sent: `BTC-USD` has no exchange suffix to strip and `BTC` alone is a
 /// different (and usually unpriced) request.
 pub fn wanted_symbols(symbols: &[String], crypto: bool) -> Vec<String> {
     let mut wanted = Vec::with_capacity(symbols.len());
@@ -253,7 +253,7 @@ pub fn wanted_symbols(symbols: &[String], crypto: bool) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct QuotePayload {
     pub symbol: Option<String>,
-    pub venue: Option<String>,
+    pub exchange: Option<String>,
     pub price: Option<f64>,
     pub previous_close: Option<f64>,
     pub change_pct: Option<f64>,
@@ -270,7 +270,7 @@ pub struct QuotePayload {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PricesResponse {
     pub quotes: BTreeMap<String, QuotePayload>,
-    pub venue: String,
+    pub exchange: String,
     pub fetched: Vec<String>,
     pub missing: Vec<String>,
     pub deferred: Vec<String>,
@@ -296,7 +296,7 @@ pub struct BarRow {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BarsEntry {
     pub symbol: String,
-    pub venue: String,
+    pub exchange: String,
     pub as_of_session: Option<String>,
     pub sessions: usize,
     pub adjusted: bool,
@@ -340,7 +340,7 @@ pub struct AtrReading {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AtrBatchResponse {
     pub atr: BTreeMap<String, AtrReading>,
-    pub venue: String,
+    pub exchange: String,
     pub period: i64,
     pub method: String,
     pub smoothing: String,
@@ -354,7 +354,7 @@ pub struct AtrRequest<'a> {
     pub period: Option<i64>,
     pub method: Option<&'a str>,
     pub smoothing: Option<&'a str>,
-    pub venue: Option<&'a str>,
+    pub exchange: Option<&'a str>,
     pub price: Option<f64>,
     pub multiplier: Option<f64>,
     pub direction: &'a str,
@@ -370,7 +370,7 @@ impl<'a> AtrRequest<'a> {
             period: None,
             method: None,
             smoothing: None,
-            venue: None,
+            exchange: None,
             price: None,
             multiplier: None,
             direction: "long",
@@ -615,7 +615,7 @@ impl Products {
     pub async fn price(
         &self,
         symbol: &str,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         max_age_seconds: Option<f64>,
         asset_class: Option<&str>,
         country_code: Option<&str>,
@@ -623,7 +623,7 @@ impl Products {
         let batch = self
             .prices(
                 std::slice::from_ref(&symbol.to_string()),
-                venue,
+                exchange,
                 max_age_seconds,
                 asset_class,
                 country_code,
@@ -641,7 +641,7 @@ impl Products {
                 format!(
                     "{} could not be priced at market {}",
                     py_repr(symbol),
-                    py_repr(&batch.venue)
+                    py_repr(&batch.exchange)
                 ),
                 404,
             )
@@ -651,23 +651,23 @@ impl Products {
 
     /// Latest prices for a batch, choosing bulk or per-symbol by size.
     ///
-    /// `venue` or `country_code` names the market, because `CBA` at the ASX and `CBA` in New
-    /// York are two instruments; with neither, a symbol's own `.AU` suffix decides and bare
-    /// symbols default to US.
+    /// `exchange` or `country_code` names the market, because `CBA` at the ASX and `CBA` in New
+    /// York are two instruments. The HTTP layer always supplies `country_code`; the suffix and
+    /// US fallbacks below it exist for internal callers, which may state neither.
     pub async fn prices(
         &self,
         symbols: &[String],
-        venue: Option<&str>,
+        exchange: Option<&str>,
         max_age_seconds: Option<f64>,
         asset_class: Option<&str>,
         country_code: Option<&str>,
     ) -> Result<PricesResponse, ProductError> {
         let kind = AssetClass::parse(asset_class.unwrap_or(""));
         // One market for the whole batch: the cache, the vendor ticker and the rows written
-        // back are all keyed by it, so a list spanning two venues is refused rather than
+        // back are all keyed by it, so a list spanning two exchanges is refused rather than
         // half-served.
         let raw: Vec<&str> = symbols.iter().map(String::as_str).collect();
-        let market = resolve_venue(venue, country_code, &raw, asset_class)?;
+        let market = resolve_exchange(exchange, country_code, &raw, asset_class)?;
         let wanted = wanted_symbols(symbols, kind.is_crypto());
         if wanted.is_empty() {
             return Err(
@@ -759,7 +759,7 @@ impl Products {
         let count = quotes.len();
         Ok(PricesResponse {
             quotes,
-            venue: market,
+            exchange: market,
             fetched,
             complete: missing.is_empty(),
             deferred: Vec::new(),
@@ -770,7 +770,7 @@ impl Products {
         })
     }
 
-    /// True when the batch is big enough, and at a venue where the feed exists, to be cheaper
+    /// True when the batch is big enough, and at an exchange where the feed exists, to be cheaper
     /// as one whole-market call.
     fn use_bulk(&self, stale: usize, market: &str) -> bool {
         stale as i64 >= self.settings.bulk_breakeven && market == "US"
@@ -802,7 +802,7 @@ impl Products {
     async fn bulk_quotes(
         &self,
         symbols: &[String],
-        venue: &str,
+        exchange: &str,
     ) -> Result<HashMap<String, CachedPrice>, ProductError> {
         let mut state = self.bulk.lock().await;
         let now = now_naive(self.clock.as_ref());
@@ -812,7 +812,7 @@ impl Products {
         if !fresh {
             // The whole-market feed is an EODHD capability; the router exposes it rather than
             // pretending Yahoo or Binance have an equivalent.
-            let quotes = self.router.whole_market_quotes(venue).await?;
+            let quotes = self.router.whole_market_quotes(exchange).await?;
             let mut snapshot: HashMap<String, PriceRow> = HashMap::new();
             let mut observed: Vec<NaiveDateTime> = Vec::new();
             let mut dropped = 0usize;
@@ -823,7 +823,7 @@ impl Products {
                 if let Some(as_of) = quote.as_of {
                     observed.push(as_of);
                 }
-                let normalised = row_from_quote(quote, venue, now);
+                let normalised = row_from_quote(quote, exchange, now);
                 if normalised.price <= 0.0 {
                     continue;
                 }
@@ -879,12 +879,12 @@ impl Products {
     /// Called by the schedule at session open + 45. Unlike [`Self::prices`] this will not
     /// accept the in-memory copy: the point is a collection at a known instant, so the
     /// 120-second snapshot is discarded first and the vendor is asked again.
-    pub async fn refresh_snapshot(&self, venue: &str) -> Result<usize, ProductError> {
+    pub async fn refresh_snapshot(&self, exchange: &str) -> Result<usize, ProductError> {
         {
             let mut state = self.bulk.lock().await;
             state.fetched_at = None;
         }
-        self.bulk_quotes(&[], venue).await?;
+        self.bulk_quotes(&[], exchange).await?;
         let state = self.bulk.lock().await;
         Ok(state.snapshot.len())
     }
@@ -899,14 +899,14 @@ impl Products {
         &self,
         symbols: &[String],
         sessions: i64,
-        venue: Option<&str>,
+        exchange: Option<&str>,
         allow_fetch: bool,
         asset_class: Option<&str>,
         country_code: Option<&str>,
     ) -> Result<BarsResponse, ProductError> {
         let kind = AssetClass::parse(asset_class.unwrap_or(""));
         let raw: Vec<&str> = symbols.iter().map(String::as_str).collect();
-        let market = resolve_venue(venue, country_code, &raw, asset_class)?;
+        let market = resolve_exchange(exchange, country_code, &raw, asset_class)?;
         let wanted = wanted_symbols(symbols, kind.is_crypto());
         if wanted.is_empty() {
             return Err(
@@ -1092,7 +1092,7 @@ impl Products {
             .iter()
             .map(|bar| DailyBarWrite {
                 symbol: symbol.to_string(),
-                // The venue travels with the bar: the same ticker can be an ASX listing and
+                // The exchange travels with the bar: the same ticker can be an ASX listing and
                 // a US one, and without it the two overwrite each other.
                 exchange: Some(exchange.to_string()),
                 session: bar.session,
@@ -1183,11 +1183,11 @@ impl Products {
             );
         }
 
-        // One normalised market for the whole call: the ATR cache is keyed by venue, so the
+        // One normalised market for the whole call: the ATR cache is keyed by exchange, so the
         // read has to ask with the same code the bars were written under.
         let raw: Vec<&str> = request.symbols.iter().map(String::as_str).collect();
-        let market = resolve_venue(
-            request.venue,
+        let market = resolve_exchange(
+            request.exchange,
             request.country_code,
             &raw,
             request.asset_class,
@@ -1332,7 +1332,7 @@ impl Products {
                 if cache_eligible && value.is_some() {
                     fresh_for_cache.push(IndicatorWrite {
                         symbol: symbol.clone(),
-                        // The venue the bars came from. Without it the row lands as US,
+                        // The exchange the bars came from. Without it the row lands as US,
                         // and the next AU request reads a US ATR out of the cache.
                         exchange: Some(market.clone()),
                         values: values.clone(),
@@ -1368,7 +1368,7 @@ impl Products {
         Ok(AtrBatchResponse {
             complete: readings.values().all(|reading| reading.value.is_some()),
             atr: readings,
-            venue: market,
+            exchange: market,
             period,
             method,
             smoothing,
@@ -1407,10 +1407,10 @@ impl Products {
 /// `change_pct` comes from [`ProviderQuote::change_pct`] so every provider is ranked with the
 /// same arithmetic — the move is computed from the price and the previous close that were
 /// observed together, never read from a vendor's own field.
-fn row_from_quote(quote: &ProviderQuote, venue: &str, fetched_at: NaiveDateTime) -> PriceRow {
+fn row_from_quote(quote: &ProviderQuote, exchange: &str, fetched_at: NaiveDateTime) -> PriceRow {
     PriceRow {
         symbol: quote.symbol.clone(),
-        venue: Some(venue.to_string()),
+        exchange: Some(exchange.to_string()),
         price: quote.price,
         bid: None,
         ask: None,
@@ -1429,7 +1429,7 @@ fn row_from_quote(quote: &ProviderQuote, venue: &str, fetched_at: NaiveDateTime)
 fn cached_from_row(row: &PriceRow) -> CachedPrice {
     CachedPrice {
         symbol: row.symbol.clone(),
-        venue: row.venue.clone().unwrap_or_default(),
+        exchange: row.exchange.clone().unwrap_or_default(),
         price: Some(row.price),
         bid: row.bid,
         ask: row.ask,
@@ -1449,7 +1449,7 @@ fn quote_payload(stored: &CachedPrice, now: NaiveDateTime) -> QuotePayload {
     let as_of_age = stored.as_of.map(|as_of| seconds_between(now, as_of));
     QuotePayload {
         symbol: Some(stored.symbol.clone()),
-        venue: Some(stored.venue.clone()),
+        exchange: Some(stored.exchange.clone()),
         price: stored.price,
         previous_close: stored.previous_close,
         change_pct: stored.change_pct,
@@ -1472,7 +1472,7 @@ fn bars_payload(
     symbol: &str,
     rows: &[BarView],
     source: &str,
-    venue: &str,
+    exchange: &str,
     provider: Option<&str>,
 ) -> BarsEntry {
     let adjusted = if rows.is_empty() {
@@ -1482,7 +1482,7 @@ fn bars_payload(
     };
     BarsEntry {
         symbol: symbol.to_string(),
-        venue: venue.to_string(),
+        exchange: exchange.to_string(),
         as_of_session: rows.last().map(|row| row.session.to_string()),
         sessions: rows.len(),
         adjusted,

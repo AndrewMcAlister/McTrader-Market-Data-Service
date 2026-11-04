@@ -1,6 +1,6 @@
 //! Provider-specific symbol rendering.
 //!
-//! Canonical identity is `(raw_symbol, asset_class, venue)`: `("IXIC", indices, None)`,
+//! Canonical identity is `(raw_symbol, asset_class, exchange)`: `("IXIC", indices, None)`,
 //! `("GLD", commodities, None)`, `("CBA", shares, AU)`. The raw symbol is never decorated by
 //! the caller — no `^`, no `=F`, no `.US` — so each provider re-interprets the same identity
 //! in its own convention.
@@ -46,16 +46,16 @@ impl ProviderId {
     }
 }
 
-/// The US venue codes that mean the house default, `US`.
-const US_VENUE_CODES: &[&str] = &[
+/// The US exchange codes that mean the house default, `US`.
+const US_EXCHANGE_CODES: &[&str] = &[
     "US", "NASDAQ", "NASDAQGS", "NASDAQGM", "NASDAQCM", "NMS", "NYSE", "NYQ", "NYS", "NYSEARCA",
     "ARCA", "PCX", "AMEX", "ASE", "BATS", "IEX", "OTC", "OTCQX", "OTCQB", "PINK",
 ];
 
-/// Which currency a venue's shares settle in. One row per currency, naming the venues and the
+/// Which currency an exchange's shares settle in. One row per currency, naming the exchanges and the
 /// provider suffixes that mean it, so EODHD and Yahoo cannot disagree about what an ASX price
 /// is denominated in.
-const VENUE_CURRENCIES: &[(&str, &[&str], &[&str])] = &[
+const EXCHANGE_CURRENCIES: &[(&str, &[&str], &[&str])] = &[
     ("AUD", &["ASX", "AU", "AX"], &[".AU", ".AX"]),
     ("GBP", &["LSE", "L", "LON", "UK"], &[".L"]),
     ("CAD", &["TSX", "TSE", "TO", "CA"], &[".TO"]),
@@ -85,31 +85,31 @@ fn effective_exchange(exchange: Option<&str>) -> Option<String> {
         .map(str::to_uppercase)
 }
 
-/// The currency `symbol`'s venue settles in, or `None` when unknown.
-pub fn venue_currency_code(symbol: &str, exchange: Option<&str>) -> Option<&'static str> {
-    let venue = effective_exchange(exchange);
+/// The currency `symbol`'s exchange settles in, or `None` when unknown.
+pub fn exchange_currency_code(symbol: &str, exchange: Option<&str>) -> Option<&'static str> {
+    let exchange = effective_exchange(exchange);
     let upper = symbol.trim().to_uppercase();
-    for (currency, venues, suffixes) in VENUE_CURRENCIES {
-        let venue_matches = venue
+    for (currency, exchanges, suffixes) in EXCHANGE_CURRENCIES {
+        let exchange_matches = exchange
             .as_deref()
-            .is_some_and(|value| venues.contains(&value));
-        if venue_matches || suffixes.iter().any(|suffix| upper.ends_with(suffix)) {
+            .is_some_and(|value| exchanges.contains(&value));
+        if exchange_matches || suffixes.iter().any(|suffix| upper.ends_with(suffix)) {
             return Some(currency);
         }
     }
     None
 }
 
-/// The EODHD venue suffix `exchange` names, or `None` if unknown.
+/// The EODHD exchange suffix `exchange` names, or `None` if unknown.
 ///
-/// `None` lets the price API refuse an unrecognised venue instead of silently falling back to
+/// `None` lets the price API refuse an unrecognised exchange instead of silently falling back to
 /// the house US default — a non-US symbol priced off a US record is not an answer.
-pub fn eodhd_venue_suffix(exchange: Option<&str>) -> Option<&'static str> {
-    let venue = effective_exchange(exchange)?;
-    if US_VENUE_CODES.contains(&venue.as_str()) {
+pub fn eodhd_exchange_suffix(exchange: Option<&str>) -> Option<&'static str> {
+    let exchange = effective_exchange(exchange)?;
+    if US_EXCHANGE_CODES.contains(&exchange.as_str()) {
         return Some(DEFAULT_EODHD_EXCHANGE);
     }
-    match venue.as_str() {
+    match exchange.as_str() {
         "ASX" | "AU" | "AX" => Some("AU"),
         "LSE" | "L" | "LON" | "UK" => Some("L"),
         "TSX" | "TSE" | "TO" | "CA" => Some("TO"),
@@ -137,7 +137,7 @@ pub fn eodhd_equity_ticker(
         let suffix = if suffix == "AX" { "AU" } else { suffix };
         return format!("{root}.{suffix}");
     }
-    if let Some(suffix) = eodhd_venue_suffix(exchange) {
+    if let Some(suffix) = eodhd_exchange_suffix(exchange) {
         return format!("{raw}.{suffix}");
     }
     let default = default_exchange
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn a_share_gets_the_venue_suffix_or_the_house_default() {
+    fn a_share_gets_the_exchange_suffix_or_the_house_default() {
         assert_eq!(eodhd_equity_ticker("AAPL", None, None), "AAPL.US");
         assert_eq!(eodhd_equity_ticker("BHP", Some("AU"), None), "BHP.AU");
         assert_eq!(eodhd_equity_ticker("BHP", Some("ASX"), None), "BHP.AU");
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn crypto_has_no_venue_and_binance_strips_separators() {
+    fn crypto_has_no_exchange_and_binance_strips_separators() {
         assert_eq!(
             symbol_for_provider("BTC-USD", AssetClass::Crypto, Some("AU"), ProviderId::Eodhd),
             Some("BTC-USD.CC".to_string())
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn yahoo_shares_use_the_asx_suffix_only_for_the_au_venue() {
+    fn yahoo_shares_use_the_asx_suffix_only_for_the_au_exchange() {
         assert_eq!(
             symbol_for_provider("CBA", AssetClass::Shares, Some("AU"), ProviderId::Yahoo),
             Some("CBA.AX".to_string())
@@ -364,13 +364,13 @@ mod tests {
     }
 
     #[test]
-    fn venue_currency_reads_the_venue_or_the_suffix() {
-        assert_eq!(venue_currency_code("CBA", Some("AU")), Some("AUD"));
-        assert_eq!(venue_currency_code("CBA.AX", None), Some("AUD"));
-        assert_eq!(venue_currency_code("VOD", Some("LSE")), Some("GBP"));
-        assert_eq!(venue_currency_code("SHOP", Some("TO")), Some("CAD"));
-        assert_eq!(venue_currency_code("0700", Some("HK")), Some("HKD"));
-        assert_eq!(venue_currency_code("SAP", Some("XETRA")), Some("EUR"));
-        assert_eq!(venue_currency_code("AAPL", Some("US")), None);
+    fn exchange_currency_reads_the_exchange_or_the_suffix() {
+        assert_eq!(exchange_currency_code("CBA", Some("AU")), Some("AUD"));
+        assert_eq!(exchange_currency_code("CBA.AX", None), Some("AUD"));
+        assert_eq!(exchange_currency_code("VOD", Some("LSE")), Some("GBP"));
+        assert_eq!(exchange_currency_code("SHOP", Some("TO")), Some("CAD"));
+        assert_eq!(exchange_currency_code("0700", Some("HK")), Some("HKD"));
+        assert_eq!(exchange_currency_code("SAP", Some("XETRA")), Some("EUR"));
+        assert_eq!(exchange_currency_code("AAPL", Some("US")), None);
     }
 }

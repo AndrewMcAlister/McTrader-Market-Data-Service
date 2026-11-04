@@ -2,12 +2,12 @@
 //!
 //! One collection, shaped exactly like the source service's `_build_schedule.run_market`:
 //!
-//! 1. refuse an unknown market, then refuse a closed venue — a manual run obeys the same
+//! 1. refuse an unknown market, then refuse a closed exchange — a manual run obeys the same
 //!    session guard as the schedule, or the guard is decorative;
 //! 2. pull the settled session into `DailySnapshot` through the one refresh implementation
 //!    `/refresh` also uses;
 //! 3. put live prices into `SymbolPriceCache`: one whole-market snapshot for the US (the only
-//!    venue EODHD publishes one for), or a bounded top-of-book universe priced per symbol
+//!    exchange EODHD publishes one for), or a bounded top-of-book universe priced per symbol
 //!    anywhere else;
 //! 4. report whether today's data is *now available*, which is the question the retry exists
 //!    to answer — "the refresh ran" is not the same claim.
@@ -55,14 +55,14 @@ const UNIVERSE_MIN_BREADTH: i64 = 50;
 /// handed to the collector unchanged and both sides see one product layer, not two.
 #[async_trait]
 pub trait CollectionProducts: Send + Sync {
-    /// Write live prices for the whole US market. The only venue with such a feed.
-    async fn refresh_snapshot(&self, venue: &str) -> Result<usize, ProductError>;
+    /// Write live prices for the whole US market. The only exchange with such a feed.
+    async fn refresh_snapshot(&self, exchange: &str) -> Result<usize, ProductError>;
 
-    /// Price a bounded symbol set at one venue through the ordinary provider router.
+    /// Price a bounded symbol set at one exchange through the ordinary provider router.
     async fn prices(
         &self,
         symbols: &[String],
-        venue: Option<&str>,
+        exchange: Option<&str>,
         max_age_seconds: Option<f64>,
         asset_class: Option<&str>,
         country_code: Option<&str>,
@@ -74,14 +74,14 @@ pub trait CollectionProducts: Send + Sync {
 
 #[async_trait]
 impl CollectionProducts for Products {
-    async fn refresh_snapshot(&self, venue: &str) -> Result<usize, ProductError> {
-        Products::refresh_snapshot(self, venue).await
+    async fn refresh_snapshot(&self, exchange: &str) -> Result<usize, ProductError> {
+        Products::refresh_snapshot(self, exchange).await
     }
 
     async fn prices(
         &self,
         symbols: &[String],
-        venue: Option<&str>,
+        exchange: Option<&str>,
         max_age_seconds: Option<f64>,
         asset_class: Option<&str>,
         country_code: Option<&str>,
@@ -89,7 +89,7 @@ impl CollectionProducts for Products {
         Products::prices(
             self,
             symbols,
-            venue,
+            exchange,
             max_age_seconds,
             asset_class,
             country_code,
@@ -159,7 +159,7 @@ impl DailyRefresh for StoreRefresh {
     }
 }
 
-/// One market's collection: the daily pull, then its venue's price feed.
+/// One market's collection: the daily pull, then its exchange's price feed.
 pub struct Collector {
     products: Arc<dyn CollectionProducts>,
     prices: Arc<dyn PriceRepository>,
@@ -188,26 +188,26 @@ impl Collector {
         }
     }
 
-    /// Price a venue's most-traded universe and answer the availability question.
+    /// Price an exchange's most-traded universe and answer the availability question.
     ///
-    /// A venue with no whole-market real-time feed has no other way to put a post-open
+    /// An exchange with no whole-market real-time feed has no other way to put a post-open
     /// observation into `SymbolPriceCache`: EODHD publishes that feed for the US only. The
     /// seed is the top of the last settled session by dollar volume, so it needs no configured
     /// list and is the set the books actually rank. A name the vendor cannot price is reported
-    /// in `missing` rather than making the venue's data absent.
+    /// in `missing` rather than making the exchange's data absent.
     async fn price_universe(&self, window: MarketWindow, now: DateTime<Utc>) -> Value {
-        let venue = window.market;
+        let exchange = window.market;
         let symbols = match self
             .prices
-            .top_symbols_by_dollar_volume(venue, self.universe_limit, UNIVERSE_MIN_BREADTH)
+            .top_symbols_by_dollar_volume(exchange, self.universe_limit, UNIVERSE_MIN_BREADTH)
             .await
         {
             Ok(symbols) => symbols,
-            Err(error) => return pricing_error(venue, format!("StoreError: {error}")),
+            Err(error) => return pricing_error(exchange, format!("StoreError: {error}")),
         };
         if symbols.is_empty() {
             return json!({
-                "venue": venue,
+                "exchange": exchange,
                 "universe": 0,
                 "available": false,
                 "reason": "no-universe",
@@ -215,22 +215,22 @@ impl Collector {
         }
         let batch = match self
             .products
-            .prices(&symbols, Some(venue), None, None, None)
+            .prices(&symbols, Some(exchange), None, None, None)
             .await
         {
             Ok(batch) => batch,
-            Err(error) => return pricing_error(venue, error.to_string()),
+            Err(error) => return pricing_error(exchange, error.to_string()),
         };
         let verdict = match self.availability(window, now).await {
             Ok(verdict) => verdict,
-            Err(detail) => return pricing_error(venue, detail),
+            Err(detail) => return pricing_error(exchange, detail),
         };
         // `count` is every symbol with a quote, cache hits included; `fetched` is only the
         // names this call bought. A retry inside the five-minute TTL prices the universe with
         // fetched=0, and reporting that as "priced 0" would read as a failure when it is the
         // opposite.
         json!({
-            "venue": venue,
+            "exchange": exchange,
             "universe": symbols.len(),
             "requested": batch.requested,
             "priced": batch.count,
@@ -241,25 +241,25 @@ impl Collector {
         })
     }
 
-    /// The venue's availability verdict, read from the price cache and the clock reference.
+    /// The exchange's availability verdict, read from the price cache and the clock reference.
     async fn availability(
         &self,
         window: MarketWindow,
         now: DateTime<Utc>,
     ) -> Result<Availability, String> {
         let country = country_key(window.market).map_err(|error| error.message)?;
-        let session = self.session(country.exchange, now).ok_or_else(|| {
+        let session = self.session(country.session_exchange, now).ok_or_else(|| {
             format!(
                 "KeyError: {}",
                 py_repr(&format!(
                     "{} is not in the clock reference",
-                    country.exchange
+                    country.session_exchange
                 ))
             )
         })?;
         let latest = self
             .prices
-            .latest_venue_price(country.venue)
+            .latest_exchange_price(country.exchange)
             .await
             .map_err(|error| format!("StoreError: {error}"))?;
         check(country.key, latest, &session).map_err(|error| error.message)
@@ -287,7 +287,7 @@ impl MarketRunner for Collector {
             return refused(
                 market,
                 "closed",
-                "the venue is not open; nothing was collected",
+                "the exchange is not open; nothing was collected",
             );
         }
 
@@ -380,8 +380,8 @@ fn refused(market: &str, status: &str, detail: impl Into<String>) -> MarketRun {
     }
 }
 
-fn pricing_error(venue: &str, detail: String) -> Value {
-    json!({"venue": venue, "available": false, "error": detail})
+fn pricing_error(exchange: &str, detail: String) -> Value {
+    json!({"exchange": exchange, "available": false, "error": detail})
 }
 
 #[cfg(test)]
@@ -417,8 +417,11 @@ mod tests {
 
     #[async_trait]
     impl CollectionProducts for FakeProducts {
-        async fn refresh_snapshot(&self, venue: &str) -> Result<usize, ProductError> {
-            self.calls.lock().unwrap().push(format!("snapshot:{venue}"));
+        async fn refresh_snapshot(&self, exchange: &str) -> Result<usize, ProductError> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("snapshot:{exchange}"));
             match &self.snapshot_error {
                 Some(message) => Err(ProductError::Refused(MarketDataError::new(
                     message.clone(),
@@ -432,7 +435,7 @@ mod tests {
         async fn prices(
             &self,
             symbols: &[String],
-            venue: Option<&str>,
+            exchange: Option<&str>,
             _max_age_seconds: Option<f64>,
             _asset_class: Option<&str>,
             _country_code: Option<&str>,
@@ -440,7 +443,7 @@ mod tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push(format!("prices:{symbols:?}:{venue:?}"));
+                .push(format!("prices:{symbols:?}:{exchange:?}"));
             if let Some(message) = &self.prices_error {
                 return Err(ProductError::Refused(MarketDataError::new(
                     message.clone(),
@@ -448,13 +451,13 @@ mod tests {
                     502,
                 )));
             }
-            let venue = venue.unwrap_or("US").to_string();
+            let exchange = exchange.unwrap_or("US").to_string();
             // One name is missing and one is fetched, the shape the source suite pinned.
             let priced = symbols.len().saturating_sub(1);
             Ok(PricesResponse {
                 count: priced,
                 quotes: BTreeMap::new(),
-                venue,
+                exchange,
                 fetched: symbols[..priced].to_vec(),
                 missing: symbols.last().cloned().into_iter().collect(),
                 deferred: Vec::new(),
@@ -494,7 +497,7 @@ mod tests {
         async fn get_prices(
             &self,
             _symbols: &[String],
-            _venue: &str,
+            _exchange: &str,
         ) -> Result<HashMap<String, CachedPrice>, StoreError> {
             Ok(HashMap::new())
         }
@@ -505,7 +508,7 @@ mod tests {
 
         async fn big_movers(
             &self,
-            _venue: &str,
+            _exchange: &str,
             _limit: i64,
             _min_price: f64,
             _min_dollar_volume: f64,
@@ -517,23 +520,23 @@ mod tests {
             })
         }
 
-        async fn latest_venue_price(
+        async fn latest_exchange_price(
             &self,
-            _venue: &str,
+            _exchange: &str,
         ) -> Result<Option<NaiveDateTime>, StoreError> {
             Ok(*self.latest.lock().unwrap())
         }
 
         async fn top_symbols_by_dollar_volume(
             &self,
-            venue: &str,
+            exchange: &str,
             limit: i64,
             min_breadth: i64,
         ) -> Result<Vec<String>, StoreError> {
             self.seeded
                 .lock()
                 .unwrap()
-                .push((venue.to_string(), limit, min_breadth));
+                .push((exchange.to_string(), limit, min_breadth));
             Ok(self.symbols.lock().unwrap().clone())
         }
     }
@@ -649,7 +652,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_closed_venue_collects_nothing() {
+    async fn a_closed_exchange_collects_nothing() {
         // Saturday: the NYSE session resolves to Monday's open.
         let products = Arc::new(FakeProducts::default());
         let prices = FakePrices::with(&[], None);
@@ -660,7 +663,10 @@ mod tests {
 
         assert!(!run.ok);
         assert_eq!(run.status, "closed");
-        assert_eq!(run.detail, "the venue is not open; nothing was collected");
+        assert_eq!(
+            run.detail,
+            "the exchange is not open; nothing was collected"
+        );
         assert!(refresh.calls().is_empty());
     }
 
@@ -767,7 +773,7 @@ mod tests {
         assert!(!run.ok);
         assert_eq!(
             run.payload["price_refresh"],
-            json!({"venue": "AU", "universe": 0, "available": false, "reason": "no-universe"})
+            json!({"exchange": "AU", "universe": 0, "available": false, "reason": "no-universe"})
         );
         assert_eq!(
             run.detail,
@@ -791,7 +797,7 @@ mod tests {
         assert!(!run.ok);
         assert_eq!(
             run.payload["price_refresh"],
-            json!({"venue": "AU", "available": false, "error": "provider exploded"})
+            json!({"exchange": "AU", "available": false, "error": "provider exploded"})
         );
     }
 

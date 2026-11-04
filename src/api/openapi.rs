@@ -189,7 +189,7 @@ pub fn document() -> Value {
             "/todays-data-is-available": {
                 "get": {
                     "tags": ["market data"],
-                    "summary": "Whether a price has been observed since the venue's last open",
+                    "summary": "Whether a price has been observed since the exchange's last open",
                     "operationId": "get_availability_todays_data_is_available_get",
                     "parameters": [country_parameter()],
                     "responses": {
@@ -202,7 +202,7 @@ pub fn document() -> Value {
             "/todays-big-movers": {
                 "get": {
                     "tags": ["market data"],
-                    "summary": "The biggest winners and losers since the venue's last open",
+                    "summary": "The biggest winners and losers since the exchange's last open",
                     "operationId": "get_big_movers_todays_big_movers_get",
                     "parameters": [
                         country_parameter(),
@@ -225,13 +225,13 @@ pub fn document() -> Value {
                     "parameters": [
                         {"name": "symbol", "in": "path", "required": true, "schema": {"type": "string"}},
                         {"name": "country_code", "in": "query", "required": true, "schema": {"type": "string", "enum": ["US", "AU"]}, "description": "The country the ticker belongs to; required"},
-                        {"name": "venue", "in": "query", "required": false, "schema": {"type": ["string", "null"]}},
+                        {"name": "exchange", "in": "query", "required": false, "schema": {"type": ["string", "null"]}, "description": "Optional second spelling of the country: US, AU/ASX, L, TO, HK, F, PA; must agree with country_code"},
                         {"name": "max_age_seconds", "in": "query", "required": false, "schema": {"type": ["number", "null"]}},
                         {"name": "asset_class", "in": "query", "required": false, "schema": {"type": ["string", "null"]}}
                     ],
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
-                        "400": {"description": "Venue or symbol refusal", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "400": {"description": "Exchange or symbol refusal", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
                         "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}},
                         "502": {"description": "Every provider refused", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
                         "503": {"description": "No product layer or busy database", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
@@ -271,7 +271,7 @@ pub fn document() -> Value {
                     "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BarsRequest"}}}},
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
-                        "400": {"description": "Venue or symbol refusal", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "400": {"description": "Exchange or symbol refusal", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
                         "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}}
                     }
                 }
@@ -307,7 +307,7 @@ pub fn document() -> Value {
                     "properties": {
                         "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Bare or suffixed symbols"},
                         "country_code": {"type": "string", "enum": ["US", "AU"], "description": "The country the tickers belong to; required"},
-                        "venue": {"type": ["string", "null"]},
+                        "exchange": {"type": ["string", "null"], "description": "Optional second spelling of the country: US, AU/ASX, L, TO, HK, F, PA; must agree with country_code"},
                         "max_age_seconds": {"type": ["number", "null"]},
                         "asset_class": {"type": ["string", "null"]}
                     },
@@ -321,7 +321,7 @@ pub fn document() -> Value {
                         "method": {"type": ["string", "null"], "description": "gap (default) or high_low"},
                         "smoothing": {"type": ["string", "null"], "description": "simple (default) or wilder"},
                         "country_code": {"type": "string", "enum": ["US", "AU"], "description": "The country the tickers belong to; required"},
-                        "venue": {"type": ["string", "null"]},
+                        "exchange": {"type": ["string", "null"], "description": "Optional second spelling of the country: US, AU/ASX, L, TO, HK, F, PA; must agree with country_code"},
                         "price": {"type": ["number", "null"]},
                         "multiplier": {"type": ["number", "null"]},
                         "direction": {"type": ["string", "null"], "description": "'long' (default) or 'short'"},
@@ -335,7 +335,7 @@ pub fn document() -> Value {
                         "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                         "sessions": {"type": "integer", "minimum": 1, "default": 15, "description": "Completed sessions to return"},
                         "country_code": {"type": "string", "enum": ["US", "AU"], "description": "The country the tickers belong to; required"},
-                        "venue": {"type": ["string", "null"]},
+                        "exchange": {"type": ["string", "null"], "description": "Optional second spelling of the country: US, AU/ASX, L, TO, HK, F, PA; must agree with country_code"},
                         "allow_fetch": {"type": "boolean", "default": true},
                         "asset_class": {"type": ["string", "null"]}
                     },

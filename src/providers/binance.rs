@@ -1,7 +1,7 @@
 //! Binance: crypto, from the free public spot API.
 //!
 //! Unmetered, so like Yahoo it earns its place on capability: EODHD serves crypto as `BTC.CC`
-//! and renders it less reliably than a venue that trades it natively.
+//! and renders it less reliably than an exchange that trades it natively.
 //!
 //! # Two things that will bite
 //!
@@ -203,7 +203,7 @@ impl Provider for BinanceProvider {
         &self,
         symbol: &str,
         _asset_class: AssetClass,
-        _venue: Option<&str>,
+        _exchange: Option<&str>,
     ) -> Result<Option<ProviderQuote>, ProviderFailure> {
         let (pair, payload) = self.first_answering_pair(symbol, TICKER_24H, &[]).await?;
         if !payload.is_object() {
@@ -238,7 +238,7 @@ impl Provider for BinanceProvider {
         symbol: &str,
         _asset_class: AssetClass,
         sessions: usize,
-        _venue: Option<&str>,
+        _exchange: Option<&str>,
     ) -> Result<Vec<ProviderBar>, ProviderFailure> {
         let limit = sessions.saturating_add(2).clamp(1, MAX_CANDLES);
         let params = [("interval", "1d".to_string()), ("limit", limit.to_string())];

@@ -91,11 +91,11 @@ fn tool_calls() -> [(&'static str, Map<String, Value>); 5] {
     [
         (
             "get_price",
-            body(json!({"symbol": "AAPL", "country_code": "US", "venue": "US"})),
+            body(json!({"symbol": "AAPL", "country_code": "US", "exchange": "US"})),
         ),
         (
             "get_prices",
-            body(json!({"symbols": ["AAPL", "MSFT"], "country_code": "US", "venue": "US"})),
+            body(json!({"symbols": ["AAPL", "MSFT"], "country_code": "US", "exchange": "US"})),
         ),
         (
             "get_atr",

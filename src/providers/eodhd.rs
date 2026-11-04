@@ -22,13 +22,13 @@ use serde_json::Value;
 
 use crate::domain::asset_class::AssetClass;
 use crate::domain::sessions::latest_completed_session;
-use crate::domain::symbols::{symbol_for_provider, venue_currency_code, ProviderId, EODHD};
+use crate::domain::symbols::{exchange_currency_code, symbol_for_provider, ProviderId, EODHD};
 use crate::error::ProviderFailure;
 use crate::providers::base::{
     epoch_naive, nonzero, number, text, truthy, volume, Provider, ProviderBar, ProviderQuote,
     WholeMarketQuotes,
 };
-use crate::providers::eodhd_client::{bare_symbol, normalise_venue, EodhdApi};
+use crate::providers::eodhd_client::{bare_symbol, normalise_exchange, EodhdApi};
 
 /// Quotes and daily bars from EODHD, plus its two whole-market calls.
 pub struct EodhdProvider {
@@ -60,10 +60,10 @@ impl Provider for EodhdProvider {
         &self,
         symbol: &str,
         asset_class: AssetClass,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Result<Option<ProviderQuote>, ProviderFailure> {
-        let market = normalise_venue(venue)?;
-        let Some(ticker) = symbol_for_provider(symbol, asset_class, venue, ProviderId::Eodhd)
+        let market = normalise_exchange(exchange)?;
+        let Some(ticker) = symbol_for_provider(symbol, asset_class, exchange, ProviderId::Eodhd)
         else {
             return Ok(None);
         };
@@ -84,7 +84,7 @@ impl Provider for EodhdProvider {
             previous_close: nonzero(payload.get("previousClose").unwrap_or(&Value::Null))
                 .or_else(|| number(payload.get("previous_close").unwrap_or(&Value::Null))),
             as_of: epoch_naive(payload.get("timestamp").unwrap_or(&Value::Null)),
-            currency: currency_of(&payload, symbol, venue),
+            currency: currency_of(&payload, symbol, exchange),
             raw_ticker: Some(ticker),
             volume: volume(payload.get("volume").unwrap_or(&Value::Null)),
         }))
@@ -99,10 +99,10 @@ impl Provider for EodhdProvider {
         symbol: &str,
         asset_class: AssetClass,
         sessions: usize,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Result<Vec<ProviderBar>, ProviderFailure> {
-        let market = normalise_venue(venue)?;
-        let Some(ticker) = symbol_for_provider(symbol, asset_class, venue, ProviderId::Eodhd)
+        let market = normalise_exchange(exchange)?;
+        let Some(ticker) = symbol_for_provider(symbol, asset_class, exchange, ProviderId::Eodhd)
         else {
             return Ok(Vec::new());
         };
@@ -139,9 +139,9 @@ impl WholeMarketQuotes for EodhdProvider {
     /// entry or a daily pass.
     async fn whole_market_quotes(
         &self,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Result<Vec<ProviderQuote>, ProviderFailure> {
-        let market = normalise_venue(venue)?;
+        let market = normalise_exchange(exchange)?;
         let rows = self.client.real_time_whole_market(&market).await?;
 
         let mut quotes = Vec::with_capacity(rows.len());
@@ -155,12 +155,12 @@ impl WholeMarketQuotes for EodhdProvider {
     }
 }
 
-fn currency_of(payload: &Value, symbol: &str, venue: Option<&str>) -> Option<String> {
+fn currency_of(payload: &Value, symbol: &str, exchange: Option<&str>) -> Option<String> {
     let stated = payload
         .get("currency")
         .filter(|currency| truthy(currency))
         .and_then(text);
-    stated.or_else(|| venue_currency_code(symbol, venue).map(str::to_string))
+    stated.or_else(|| exchange_currency_code(symbol, exchange).map(str::to_string))
 }
 
 /// One `/eod/` row, or `None` when it is incomplete, malformed, or still trading.
@@ -256,18 +256,18 @@ mod tests {
         async fn real_time(
             &self,
             symbol: &str,
-            venue: Option<&str>,
+            exchange: Option<&str>,
         ) -> Result<Value, ProviderFailure> {
             self.calls
                 .lock()
                 .unwrap()
-                .push((symbol.to_string(), venue.map(str::to_string), 0));
+                .push((symbol.to_string(), exchange.map(str::to_string), 0));
             Ok(self.rows.first().cloned().unwrap_or(Value::Null))
         }
 
         async fn real_time_whole_market(
             &self,
-            _venue: &str,
+            _exchange: &str,
         ) -> Result<Vec<Value>, ProviderFailure> {
             Ok(self.rows.clone())
         }
@@ -275,21 +275,22 @@ mod tests {
         async fn eod(
             &self,
             symbol: &str,
-            venue: Option<&str>,
+            exchange: Option<&str>,
             days: i64,
             _to_date: Option<NaiveDate>,
         ) -> Result<Vec<Value>, ProviderFailure> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((symbol.to_string(), venue.map(str::to_string), days));
+            self.calls.lock().unwrap().push((
+                symbol.to_string(),
+                exchange.map(str::to_string),
+                days,
+            ));
             Ok(self.rows.clone())
         }
 
         async fn intraday(
             &self,
             _symbol: &str,
-            _venue: Option<&str>,
+            _exchange: Option<&str>,
             _interval: &str,
             _start: i64,
             _end: i64,

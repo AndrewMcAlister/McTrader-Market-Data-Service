@@ -311,7 +311,7 @@ pub async fn refresh_daily_bars(
 
     let started = Instant::now();
     let units_before = client.units_spent();
-    // What the venue's own clock says should be available, reported next to what the pull
+    // What the exchange's own clock says should be available, reported next to what the pull
     // actually returned: "the refresh ran" and "the refresh produced the expected session"
     // are different claims, and only the second is useful.
     let expected = latest_completed_session(Some(&request.market), clock.now_utc()).to_string();
@@ -359,7 +359,7 @@ pub async fn refresh_daily_bars(
     if behind_expected {
         tracing::warn!(
             "bulk refresh returned session {} but {expected} was expected — vendor lag or a \
-             venue holiday",
+             exchange holiday",
             newest.unwrap_or_default()
         );
     }

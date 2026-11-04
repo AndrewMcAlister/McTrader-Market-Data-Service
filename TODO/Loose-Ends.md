@@ -11,7 +11,7 @@ Resolved items are removed rather than kept as history — the tests are the rec
 **Source case:** the Python refresh caught an exception from `latest_completed_session` and
 returned `expected_session: null` with the pull still reported.
 
-**Why it is not ported:** the Rust session rule is total. An unknown or unresolved venue zone
+**Why it is not ported:** the Rust session rule is total. An unknown or unresolved exchange zone
 falls back to the previous UTC date and logs a warning, so the calendar cannot fail and a
 refresh always reports a session. There is no error path to exercise, and inventing one would
 add a failure mode the production code does not have.
@@ -67,7 +67,7 @@ answered 500.
 **Port difference:** `Collector::run_market` catches every refresh failure and returns
 `MarketRun { ok: false, status: "error", ... }`, which the endpoint renders as 409. The failure
 is still reported in the payload and recorded by the scheduler, but the status code no longer
-distinguishes "the venue is closed" from "the vendor failed". The collector documents this as
+distinguishes "the exchange is closed" from "the vendor failed". The collector documents this as
 deliberate: a manual run answers rather than raises.
 
 **Decision owed:** keep the 409 and accept it as the one shape for every non-refresh outcome, or

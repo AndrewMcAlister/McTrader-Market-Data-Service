@@ -87,7 +87,7 @@ pub trait Provider: Send + Sync {
         &self,
         symbol: &str,
         asset_class: AssetClass,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Result<Option<ProviderQuote>, ProviderFailure>;
 
     /// Completed daily bars, oldest first. Empty when the provider cannot answer.
@@ -96,7 +96,7 @@ pub trait Provider: Send + Sync {
         symbol: &str,
         asset_class: AssetClass,
         sessions: usize,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Result<Vec<ProviderBar>, ProviderFailure>;
 }
 
@@ -109,7 +109,7 @@ pub trait Provider: Send + Sync {
 pub trait WholeMarketQuotes: Send + Sync {
     async fn whole_market_quotes(
         &self,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Result<Vec<ProviderQuote>, ProviderFailure>;
 }
 

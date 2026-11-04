@@ -2,7 +2,7 @@
 //!
 //! # Why it is tied to the session
 //!
-//! The book ranks on a whole-market pull, and the pull has to be taken while the venue is
+//! The book ranks on a whole-market pull, and the pull has to be taken while the exchange is
 //! open. A price collected at 02:00 on a Sunday is either a stale echo or a synthetic print,
 //! and both are the kind of quote a manipulator can leave lying around for a screener to
 //! find. So collection is tied to the session, not to a wall clock:
@@ -26,7 +26,7 @@
 //!
 //! It does not backfill. If the service was down all session, the day stays missing and the
 //! next day's pull carries only its own session; the daily job's `--since` is how a gap is
-//! closed by hand. And it never fires while the venue is closed: [`RefreshScheduler::tick`]
+//! closed by hand. And it never fires while the exchange is closed: [`RefreshScheduler::tick`]
 //! refuses, and the collection itself re-checks `in_session` before it writes anything,
 //! because a guard on the schedule alone can be defeated by a manual run.
 
@@ -43,7 +43,7 @@ use tokio::task::JoinHandle;
 use crate::clock::{iso_utc, MarketClock, ResolvedSession};
 use crate::store::models::ExchangeRow;
 
-/// One venue whose bulk data is collected on a schedule.
+/// One exchange whose bulk data is collected on a schedule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MarketWindow {
     /// Vendor market code, as `/eod-bulk-last-day/{market}`.
@@ -146,10 +146,10 @@ impl SessionSchedule {
             .is_ok_and(|session| session.is_open)
     }
 
-    /// Today's fire instant for this venue: the session open plus the offset.
+    /// Today's fire instant for this exchange: the session open plus the offset.
     ///
     /// Read off the resolved session, so it is already in UTC and already DST-correct. On a
-    /// day the venue is shut, the session resolves to the *next* open, which is what the
+    /// day the exchange is shut, the session resolves to the *next* open, which is what the
     /// caller wants: the fire time for the day it will actually trade.
     pub fn fire_time(
         &self,
@@ -222,7 +222,7 @@ pub struct Attempt {
 /// Per-market in-memory state for the current session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MarketState {
-    /// The venue's date this state belongs to.
+    /// The exchange's date this state belongs to.
     pub session: Option<String>,
     pub attempts: Vec<Attempt>,
 }
@@ -293,7 +293,7 @@ impl RefreshScheduler {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The venue's own calendar date, so a new session starts with clean state.
+    /// The exchange's own calendar date, so a new session starts with clean state.
     fn date_key(session: &ResolvedSession, at: DateTime<Utc>) -> String {
         session
             .open_utc
@@ -322,7 +322,7 @@ impl RefreshScheduler {
             };
             if !session.is_open {
                 // Closed: nothing is collected, and nothing is recorded as a failure —
-                // a closed venue is not an outage.
+                // a closed exchange is not an outage.
                 continue;
             }
 
@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_closed_venue_is_not_in_session_and_nothing_is_collected() {
+    async fn a_closed_exchange_is_not_in_session_and_nothing_is_collected() {
         let schedule = schedule();
         assert!(!schedule.in_session(MARKETS[0], utc(2026, 10, 31, 12, 0)));
 

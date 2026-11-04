@@ -2,11 +2,11 @@
 //!
 //! # Two clocks, one answer
 //!
-//! The service answers "is this venue open?" the same way McTrader does, because two books
+//! The service answers "is this exchange open?" the same way McTrader does, because two books
 //! disagreeing about whether a market is open is the failure this port exists to prevent:
 //!
-//! * **Clock A — the exchange clock.** `dbo.Exchanges` gives each venue's local open and
-//!   close, DST resolved in the venue's own zone. A session is open when
+//! * **Clock A — the exchange clock.** `dbo.Exchanges` gives each exchange's local open and
+//!   close, DST resolved in the exchange's own zone. A session is open when
 //!   `open_utc <= now < close_utc`.
 //! * **Clock B — the broker's synthetic 24-hour clock.** 00:00–23:59 UTC, with Saturday and
 //!   Sunday skipped when the rule says the class does not trade weekends.
@@ -25,7 +25,7 @@
 //! # Time zones
 //!
 //! Windows abbreviations ("EST", "AEST") and country codes ("US", "AU") are mapped to IANA
-//! names *before* lookup. `chrono_tz::Tz::from_str("EST")` would otherwise pin the venue to
+//! names *before* lookup. `chrono_tz::Tz::from_str("EST")` would otherwise pin the exchange to
 //! a fixed −05:00 all year, which is an hour wrong for the eight months New York is on
 //! daylight time.
 //!
@@ -599,7 +599,7 @@ fn skip_weekend(mut date: NaiveDate) -> NaiveDate {
 }
 
 /// A wall-clock time on a date in a zone, choosing the earlier instant when the hour repeats
-/// and degrading to the UTC interpretation for a wall time a DST jump skipped. The venues in
+/// and degrading to the UTC interpretation for a wall time a DST jump skipped. The exchanges in
 /// the reference open at 09:30 and 10:00, neither of which is ever skipped.
 fn local_at(date: NaiveDate, time: NaiveTime, zone: Tz) -> DateTime<Tz> {
     let naive = date.and_time(time);
@@ -611,7 +611,7 @@ fn local_at(date: NaiveDate, time: NaiveTime, zone: Tz) -> DateTime<Tz> {
 }
 
 impl MarketClock {
-    /// Clock A: the venue's own hours, in the venue's own timezone.
+    /// Clock A: the exchange's own hours, in the exchange's own timezone.
     pub fn exchange_session(
         &self,
         exchange: &ExchangeRow,
@@ -635,7 +635,7 @@ impl MarketClock {
         let local_now = ref_utc.with_timezone(&zone);
 
         if !weekend && is_weekend(local_now.date_naive()) {
-            // Project the next open onto Monday, keeping the venue's wall-clock open time.
+            // Project the next open onto Monday, keeping the exchange's wall-clock open time.
             let weekday = local_now.weekday().num_days_from_monday();
             let days_until_monday = u64::from(7 - weekday);
             let next_date = local_now.date_naive() + Days::new(days_until_monday);
@@ -779,7 +779,7 @@ impl MarketClock {
     /// One broker–asset-class pair, through the same rule McTrader applies.
     ///
     /// When the exchange clock applies and the broker maps several exchanges, the first active
-    /// one is used. They are the same venue class in practice (Alpaca: NYSE, NASDAQ, ARCA,
+    /// one is used. They are the same exchange class in practice (Alpaca: NYSE, NASDAQ, ARCA,
     /// AMEX, IEX, all 09:30–16:00 New York; IBKR: ASX and NSX, both 10:00–16:00 Sydney).
     pub fn resolve(
         &self,
@@ -888,7 +888,7 @@ impl MarketClock {
     }
 
     /// `(opens, closes)` as UTC `HH:MM` for the reference day, with the close rolled when the
-    /// venue's close is after midnight in UTC.
+    /// exchange's close is after midnight in UTC.
     fn exchange_hours_utc(
         &self,
         exchange: &ExchangeRow,
@@ -1020,7 +1020,7 @@ mod tests {
 
     #[test]
     fn the_session_shifts_an_hour_when_new_york_changes_clock() {
-        // 30 Oct is EDT (13:30 UTC), 2 Nov is EST (14:30 UTC). The venue does not move.
+        // 30 Oct is EDT (13:30 UTC), 2 Nov is EST (14:30 UTC). The exchange does not move.
         let clock = reference();
         let nyse = exchange(&clock, "NYSE");
         let before = clock.exchange_session(&nyse, utc(2026, 10, 30, 14, 0), false);

@@ -1,18 +1,18 @@
 //! Is today's data in yet, for a country?
 //!
-//! The question a caller actually asks before it trades: "has this venue's data been
+//! The question a caller actually asks before it trades: "has this exchange's data been
 //! collected since the session opened?" — not "is the database reachable" and not "is there a
 //! row". A row stamped before the open is yesterday's, however recently it was written.
 //!
 //! ```text
-//! available = latest observed price for the venue >= the venue's most recent open
+//! available = latest observed price for the exchange >= the exchange's most recent open
 //! ```
 //!
 //! Consequences worth stating, because each is a case that would otherwise look like a bug:
 //!
 //! * Before the open, today's open is in the FUTURE, so yesterday's data is not "after the
 //!   session open" and the answer is false. That is what a screener wants at 09:00 New York.
-//! * On a Saturday the clock resolves the venue to Monday's session, so the answer is false
+//! * On a Saturday the clock resolves the exchange to Monday's session, so the answer is false
 //!   all weekend — there is no "today" to have data for.
 //! * A price fetched at 02:00 is not counted: it is stamped before the open, so it cannot
 //!   make the answer true.
@@ -23,25 +23,28 @@ use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 
 use crate::error::{py_repr, MarketDataError};
 
-/// Country code -> the venue code in `SymbolPriceCache` and the exchange code in the clock
+/// Country code -> the exchange code in `SymbolPriceCache` and the exchange code in the clock
 /// reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Country {
     pub key: &'static str,
-    pub venue: &'static str,
+    /// The vendor/DB exchange code the caches are keyed by (`US`, `AU`).
     pub exchange: &'static str,
+    /// The clock reference's name for the same market (`NYSE`, `ASX`), which is what the
+    /// session resolver is asked about.
+    pub session_exchange: &'static str,
 }
 
 pub const COUNTRIES: &[Country] = &[
     Country {
         key: "US",
-        venue: "US",
-        exchange: "NYSE",
+        exchange: "US",
+        session_exchange: "NYSE",
     },
     Country {
         key: "AU",
-        venue: "AU",
-        exchange: "ASX",
+        exchange: "AU",
+        session_exchange: "ASX",
     },
 ];
 
@@ -50,8 +53,8 @@ pub const COUNTRIES: &[Country] = &[
 pub struct Availability {
     pub available: bool,
     pub country: String,
-    pub venue: String,
     pub exchange: String,
+    pub session_exchange: String,
     pub latest_utc: Option<DateTime<Utc>>,
     pub session_open_utc: Option<DateTime<Utc>>,
     pub session_close_utc: Option<DateTime<Utc>>,
@@ -128,8 +131,8 @@ pub fn check(
     Ok(Availability {
         available,
         country: country.key.to_string(),
-        venue: country.venue.to_string(),
         exchange: country.exchange.to_string(),
+        session_exchange: country.session_exchange.to_string(),
         latest_utc: latest,
         session_open_utc: session.open_utc,
         session_close_utc: session.close_utc,
@@ -180,6 +183,26 @@ mod tests {
     fn an_unknown_country_is_a_caller_error() {
         let error = country_key("NZ").unwrap_err();
         assert!(error.message.contains("US"));
+    }
+
+    #[test]
+    fn the_answer_keeps_the_cache_exchange_and_the_clock_exchange_apart() {
+        // The price cache is keyed by US/AU; the clock reference is keyed by NYSE/ASX. They are
+        // two names for the same market and must not be used interchangeably.
+        let window = session(
+            "NYSE",
+            utc(2026, 11, 2, 14, 30),
+            utc(2026, 11, 2, 21, 0),
+            true,
+        );
+        let result = check("US", None, &window).unwrap();
+        assert_eq!(result.exchange, "US");
+        assert_eq!(result.session_exchange, "NYSE");
+
+        let window = session("ASX", utc(2026, 11, 1, 23, 0), utc(2026, 11, 2, 5, 0), true);
+        let result = check("AU", None, &window).unwrap();
+        assert_eq!(result.exchange, "AU");
+        assert_eq!(result.session_exchange, "ASX");
     }
 
     #[test]

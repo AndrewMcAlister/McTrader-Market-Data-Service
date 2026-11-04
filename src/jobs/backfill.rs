@@ -26,7 +26,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde::Serialize;
 
 use crate::domain::sessions::latest_completed_session;
-use crate::providers::eodhd_client::normalise_venue;
+use crate::providers::eodhd_client::normalise_exchange;
 use crate::refresh::RefreshFailure;
 use crate::store::keys::required_exchange_key;
 use crate::store::models::{DailyBarWrite, WarehouseSession};
@@ -67,7 +67,7 @@ pub struct RawCloseSummary {
 /// Aggregate `BarHourly` into `DailySnapshot`. Costs no vendor units.
 ///
 /// `today` is injected so the window is a parameter rather than the wall clock, and `market`
-/// is normalised once here: the warehouse is the US tape today, but the row's venue is
+/// is normalised once here: the warehouse is the US tape today, but the row's exchange is
 /// stamped from the market the caller named rather than assumed.
 pub async fn seed_from_barhourly<S>(
     store: &S,
@@ -79,7 +79,7 @@ pub async fn seed_from_barhourly<S>(
 where
     S: WarehouseRepository + DailyBarRepository + ?Sized,
 {
-    let market = normalise_venue(Some(market))?;
+    let market = normalise_exchange(Some(market))?;
     let exchange = required_exchange_key(Some(&market))?;
     let since = days_before(today, days)?;
 
@@ -141,7 +141,7 @@ pub fn seed_row(session: &WarehouseSession, exchange: &str) -> Option<DailyBarWr
 
 /// Fill `DailySnapshot.RawClose` from the unadjusted 5-minute tape. Costs no vendor units.
 ///
-/// `until` is the latest completed session the venue's own clock allows; `days` reaches back
+/// `until` is the latest completed session the exchange's own clock allows; `days` reaches back
 /// from there. Rows already carrying a raw close are never overwritten.
 pub async fn fill_raw_close<S>(
     store: &S,
@@ -152,7 +152,7 @@ pub async fn fill_raw_close<S>(
 where
     S: WarehouseRepository + ?Sized,
 {
-    let market = normalise_venue(Some(market))?;
+    let market = normalise_exchange(Some(market))?;
     let exchange = required_exchange_key(Some(&market))?;
     let until = latest_completed_session(Some(&market), now);
     let since = days_before(until, days.max(1))?;

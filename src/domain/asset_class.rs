@@ -28,7 +28,7 @@ pub const ASSET_CLASSES: [AssetClass; 6] = [
     AssetClass::Forex,
 ];
 
-/// The market code an asset with no venue is cached under. `sessions::market_code` uses the
+/// The market code an asset with no exchange is cached under. `sessions::market_code` uses the
 /// same label, so a bar and the ATR built from it are filed in the same place.
 pub const CRYPTO_MARKET: &str = "CRYPTO";
 

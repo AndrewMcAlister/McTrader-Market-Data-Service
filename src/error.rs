@@ -151,8 +151,11 @@ mod tests {
 
     #[test]
     fn display_matches_the_python_exception_text() {
-        let error = MarketDataError::bad_request("unknown-venue", "NOWHERE is not a market");
-        assert_eq!(error.to_string(), "unknown-venue: NOWHERE is not a market");
+        let error = MarketDataError::bad_request("unknown-exchange", "NOWHERE is not a market");
+        assert_eq!(
+            error.to_string(),
+            "unknown-exchange: NOWHERE is not a market"
+        );
         let bare = MarketDataError::bad_request("no-symbols", "");
         assert_eq!(bare.to_string(), "no-symbols");
     }

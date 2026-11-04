@@ -119,11 +119,11 @@ impl ProviderRouter {
         &self,
         symbol: &str,
         asset_class: AssetClass,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> Option<ProviderQuote> {
         let candidates = self.candidates(asset_class);
         for (index, (key, provider)) in candidates.iter().enumerate() {
-            match provider.quote(symbol, asset_class, venue).await {
+            match provider.quote(symbol, asset_class, exchange).await {
                 Err(error) => {
                     self.record(
                         symbol,
@@ -163,11 +163,11 @@ impl ProviderRouter {
         symbol: &str,
         asset_class: AssetClass,
         sessions: usize,
-        venue: Option<&str>,
+        exchange: Option<&str>,
     ) -> (Vec<ProviderBar>, Option<&'static str>) {
         let candidates = self.candidates(asset_class);
         for (index, (key, provider)) in candidates.iter().enumerate() {
-            match provider.bars(symbol, asset_class, sessions, venue).await {
+            match provider.bars(symbol, asset_class, sessions, exchange).await {
                 Err(error) => {
                     self.record(
                         symbol,
@@ -200,10 +200,10 @@ impl ProviderRouter {
     /// Every US listing's latest price from the one provider that has such a feed.
     pub async fn whole_market_quotes(
         &self,
-        venue: &str,
+        exchange: &str,
     ) -> Result<Vec<ProviderQuote>, ProviderFailure> {
         match &self.whole_market {
-            Some(provider) => provider.whole_market_quotes(Some(venue)).await,
+            Some(provider) => provider.whole_market_quotes(Some(exchange)).await,
             None => Err(ProviderFailure::new(
                 "no-bulk-provider",
                 "the whole-market feed is an EODHD capability and EODHD is not configured",
@@ -344,7 +344,7 @@ mod tests {
             &self,
             _symbol: &str,
             _asset_class: AssetClass,
-            _venue: Option<&str>,
+            _exchange: Option<&str>,
         ) -> Result<Option<ProviderQuote>, ProviderFailure> {
             self.quote_calls.fetch_add(1, Ordering::Relaxed);
             if let Some(error) = &self.quote_error {
@@ -358,7 +358,7 @@ mod tests {
             _symbol: &str,
             _asset_class: AssetClass,
             _sessions: usize,
-            _venue: Option<&str>,
+            _exchange: Option<&str>,
         ) -> Result<Vec<ProviderBar>, ProviderFailure> {
             self.bars_calls.fetch_add(1, Ordering::Relaxed);
             Ok(self.bars_result.clone())
@@ -373,7 +373,7 @@ mod tests {
     impl WholeMarketQuotes for FakeWholeMarket {
         async fn whole_market_quotes(
             &self,
-            _venue: Option<&str>,
+            _exchange: Option<&str>,
         ) -> Result<Vec<ProviderQuote>, ProviderFailure> {
             Ok(self.quotes.clone())
         }

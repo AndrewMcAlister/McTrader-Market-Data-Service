@@ -1,0 +1,18 @@
+# Line endings, stated rather than inherited from whoever's core.autocrlf is set.
+* text=auto
+
+*.rs    text eol=lf
+*.md    text eol=lf
+*.sql   text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+
+# PowerShell and cmd files are executed by Windows tooling that expects CRLF.
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+*.png   binary
+*.jpg   binary

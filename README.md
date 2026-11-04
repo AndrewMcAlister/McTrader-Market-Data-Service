@@ -31,7 +31,7 @@ McTrader      ─┘        │
 > **Three names, deliberately different.** The repository is `McTrader-Market-Data-Service`; the
 > Windows service and the product are `McTrader_Market_Data_Service` — unchanged, so SCM scripts
 > and log shipping keep working. The Rust crate is `mmds`, and the binaries are `mmds-service`,
-> `mmds-daily`, `mmds-clock`, `mmds-mcp` and `mmds-tool`.
+> `mmds-daily`, `mmds-mcp` and `mmds-tool`.
 
 ---
 
@@ -52,19 +52,17 @@ src/
   schedule.rs            in-process US/AU collection state machine
   api/                   axum router, DTOs, extractors, error rendering, OpenAPI
   mcp.rs                 MCP proxy tools
-  guards/                named guard functions, indexed by docs/GUARD_CATALOGUE.md
   jobs/                  bulk pull, BarHourly seed, RawClose fill, indicator rebuild
   bin/
     mmds-service.rs      Windows service host: logging, startup checks, HTTP serve, shutdown
     mmds-daily.rs        bulk load / seed / raw-close fill / indicator rebuild CLI
-    mmds-clock.rs        market-clock diagnostic
     mmds-mcp.rs          stdio + streamable-http MCP proxy
-    mmds-tool.rs         operator subcommands (apply-schema, probes, copy-exchanges, ...)
+    mmds-tool.rs         operator subcommands (apply-schema, probes, copy-exchanges, check-mcp, ...)
 sql/                     schema and index scripts, reused verbatim from the reference
 data/clock.json          broker and exchange reference data
-tests/                   API contract, SQL integration (ignored by default), parity
-scripts/                 launchers, installers and the parity harness
-docs/                    GUARD_CATALOGUE.md
+tests/                   API contract, SQL integration (ignored by default)
+scripts/                 launchers and installers
+docs/                    GUARD_CATALOGUE.md: every spending/serving decision and its one location
 INTERFACE.md             the frozen external contract
 WIRING.md                the integration checklist
 ```
@@ -227,13 +225,13 @@ symbol from the vendor once and names it in `fetched`.
 - `GET /stats` — row counts, cache hit/fetch counters, vendor units spent this process, and
   `usage_today` from the spend ledger.
 - `GET /docs` — OpenAPI UI.
-- `POST` / `GET` / `DELETE /secrets/eodhd` — store, inspect (masked) and remove the vendor key in
+- `POST` / `GET /secrets/eodhd` — store and inspect (masked) the vendor key in
   this account's keyring. See "Storing the vendor key at runtime" below.
 - `POST /admin/shutdown` — stop this process from inside it, which is what a wedged service needs;
   nothing in an interactive shell can terminate a session-0 process.
 - `POST /refresh`, `POST /schedule/run` — the on-demand bulk pull and a manual collection run.
 
-When `MDS_ADMIN_TOKEN` is configured, `POST`/`DELETE /secrets/eodhd`, `POST /refresh` and
+When `MDS_ADMIN_TOKEN` is configured, `POST /secrets/eodhd`, `POST /refresh` and
 `POST /schedule/run` require `X-Admin-Token`.
 
 ---
@@ -774,6 +772,18 @@ All by environment variable; defaults are the safe ones.
 | `MDS_MCP_TIMEOUT` | `90` | MCP proxy request timeout, seconds |
 | `MDS_EXCHANGE_SOURCE` | `McTrader_Live` | source database for `mmds-tool copy-exchanges` |
 
+### SQL Server connectivity (Rust-specific)
+
+`MDS_DB_SERVER` accepts the same three forms as the ODBC `SERVER=` keyword: `host`,
+`host\instance` and `host,port`. **TDS reaches SQL Server over TCP only.** The Python service
+used pyodbc, which silently falls back to shared memory on the database host; the Rust service
+cannot. Before cutover, the instance's TCP/IP protocol must be enabled (SQL Server Configuration
+Manager → Protocols for MSSQLSERVER → TCP/IP), the service restarted, and the port recorded in
+`MDS_DB_SERVER` if it is not 1433. On this host the protocol is currently **disabled**: the only
+TCP listener is the Dedicated Administrator Connection on 1434, which accepts a single session.
+The integration suite reaches the engine through it with `MDS_TEST_SERVER=localhost,1434`; the
+two-session lock-wait test needs `MDS_TEST_CONCURRENCY=1` and a TCP-enabled instance.
+
 Parsing rules, reproduced exactly from the reference:
 
 - a boolean is false only for `"0"`, `"false"` or `"False"`; anything else is true;
@@ -804,8 +814,7 @@ declaring the port complete.
 - `rustup` with the stable MSVC toolchain, and Visual Studio 2022 Build Tools with the
   "Desktop development with C++" workload (for `link.exe`).
 - SQL Server reachable with the `Market_Data` database; Windows integrated authentication by default.
-- No Python and no ODBC Driver 17 are required by the Rust service — it speaks TDS directly. The
-  ODBC driver is still needed if you keep the Python service running during parity.
+- No Python and no ODBC Driver 17 are required by the Rust service — it speaks TDS directly.
 - An EODHD key is optional. Without one, Yahoo and Binance still answer; see "No key does not stop
   the service" below.
 
@@ -822,9 +831,8 @@ The binaries land in `target\release\`:
 |---|---|
 | `mmds-service.exe` | the long-running HTTP service, supervised by NSSM |
 | `mmds-daily.exe` | bulk pull, free seed, raw-close fill, indicator rebuild |
-| `mmds-clock.exe` | print the resolved market clock and session for diagnosis |
 | `mmds-mcp.exe` | MCP proxy over stdio or streamable-http |
-| `mmds-tool.exe` | operator subcommands: apply-schema, copy-exchanges, probes, smoke tests |
+| `mmds-tool.exe` | operator subcommands: apply-schema, copy-exchanges, probes, smoke tests, check-mcp |
 
 Commands below name the binaries directly. Add `target\release` to `PATH`, prefix with
 `.\target\release\`, or use the `run.ps1` wrappers.
@@ -856,7 +864,7 @@ cargo run --release --bin mmds-service
 lock, scheduler state and process counters; a second instance would mean two caches and two
 100-unit bulk pulls for one market. Scale out only after the snapshot moves to a shared store.
 
-### Tests and parity
+### Tests
 
 ```powershell
 cargo fmt --check
@@ -868,12 +876,6 @@ cargo build --release
 The unit and HTTP contract tests use injected providers and a fake store; no test reads the real
 EODHD key or spends vendor units. SQL integration tests are `#[ignore]`d unless
 `MDS_TEST_DATABASE` names a disposable database.
-
-`scripts/parity.ps1` runs the Python service on 8003 and the Rust service on 8013 against the same
-database and compares the stable endpoints — `/bars` with `allow_fetch=false`, cache-only `/atr`,
-the clock/session/exchange endpoints and the availability endpoints — after normalising timestamps
-and ages. `/prices` is compared for shape and venue, not live values. Do not use `force=true` on
-`/refresh` during verification without approving the 100-unit spend; use the `already-fresh` path.
 
 ---
 
@@ -1033,9 +1035,12 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8003/secrets/eodhd `
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/secrets/eodhd` | store the key, and rebuild the vendor client so it takes effect at once |
+| `POST` | `/secrets/eodhd` | store the key (409 when one is already configured), and rebuild the vendor client so it takes effect at once |
 | `GET` | `/secrets/eodhd` | whether a key is stored, a **masked** form, and which source is in use |
-| `DELETE` | `/secrets/eodhd` | remove the key; the service keeps running |
+
+Once a key is set it is neither replaced nor removed over HTTP: `POST` answers 409 and there is
+no `DELETE`. Rotate it by editing the account's `market_data:eodhd:global` / `eodhd:api_key`
+entry in Windows Credential Manager.
 
 **The key is never returned.** `GET` gives `masked` (last four characters), `length`, the keyring
 target and `backend` — enough to confirm *which* key is stored, useless to anyone intercepting it:
@@ -1065,7 +1070,7 @@ declared rather than hidden. Verified with the key removed:
 
 #### Protecting the write
 
-`POST` / `DELETE /secrets/eodhd`, `POST /refresh` and `POST /schedule/run` are privileged: a local
+`POST /secrets/eodhd`, `POST /refresh` and `POST /schedule/run` are privileged: a local
 process that can overwrite the key can point this service at an attacker's key, and once the service
 runs as LocalSystem it can make SYSTEM store a key the user could not write themselves.
 
@@ -1142,9 +1147,14 @@ Run it by hand to check before installing:
 | SQL driver | `MDS_DB_DRIVER` is accepted but unused; tiberius speaks TDS directly, so ODBC Driver 17 is not needed |
 | SQL authentication | `MDS_DB_TRUSTED=0` now works, using optional `MDS_DB_USER` / `MDS_DB_PASSWORD` |
 | `/secrets/eodhd` `backend` | reports the Rust credential-store backend instead of `WinVaultKeyring`; informational |
+| `/secrets/eodhd` surface | `DELETE` is removed, and `POST` is set-once: it answers 409 `key-already-set` when a key is already configured, so the key can only be set over HTTP when none exists |
 | OpenAPI document | generated by utoipa; paths, methods and fields match, but descriptions and ordering may differ from FastAPI's |
 | JSON numbers | parsed values match; textual formatting of floats may differ |
-| Request-validation errors | FastAPI-shaped where practical, not guaranteed byte-identical |
+| Request validation (body) | DTO refusals (`/bars`, `/prices`, `/atr`) are 422 with FastAPI's `{"detail":[...]}` shape; the `msg` text is not pydantic's |
+| Request validation (extractors) | malformed JSON or a mistyped query value is refused by axum with 400 and a plain-text body before any handler; FastAPI answered 422 JSON |
+| `session_date` | typed as a date; an unparseable value is a 422 here, while Python accepted the string and failed later |
+| `/schedule/run` failure | a vendor failure is caught and answered 409 `{"ok":false,"status":"error",...}`; Python let it escape as 500 |
+| `/docs` | redirects 303 to `/docs/` (Swagger UI); FastAPI served 200 at `/docs` |
 | Process model | still exactly one service instance; the snapshot, refresh lock, scheduler and counters are process-local |
 
 At cutover, stop and remove the Python service. Do not run both against port 8003, and do not let

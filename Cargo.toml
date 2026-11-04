@@ -1,0 +1,61 @@
+[package]
+name = "mmds"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "McTrader market data service: prices, daily bars and ATR over one cache"
+license = "proprietary"
+publish = false
+
+[dependencies]
+async-trait = "0.1.92"
+bb8 = "0.9.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10.4"
+clap = { version = "4.6", features = ["derive"] }
+rmcp = { version = "3.8", features = [
+    "client",
+    "server",
+    "transport-child-process",
+    "transport-io",
+    "transport-streamable-http-server",
+] }
+reqwest = { version = "0.13.5", default-features = false, features = [
+    "gzip",
+    "json",
+    "query",
+    "rustls",
+] }
+rust_decimal = "1.43.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tiberius = { version = "0.13.0", features = ["chrono", "rust_decimal", "sql-browser-tokio"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = [
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
+tokio-util = { version = "0.7.20", features = ["compat"] }
+tracing = "0.1.44"
+tracing-subscriber = "0.3"
+axum = "0.8"
+tower-http = { version = "0.7", features = ["trace", "limit"] }
+utoipa = "6"
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
+keyring-core = "1"
+windows-native-keyring-store = "1"
+
+[dev-dependencies]
+async-trait = "0.1.92"
+chrono = "0.4.45"
+http-body-util = "0.1"
+pretty_assertions = "1.4.1"
+serde_json = "1.0.154"
+tempfile = "3"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync"] }
+tower = { version = "0.5", features = ["util"] }
+wiremock = "0.6.5"

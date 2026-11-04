@@ -89,15 +89,21 @@ fn child_command(base_url: &str) -> tokio::process::Command {
 /// One call per tool, with the shape the source tool used.
 fn tool_calls() -> [(&'static str, Map<String, Value>); 5] {
     [
-        ("get_price", body(json!({"symbol": "AAPL", "venue": "US"}))),
+        (
+            "get_price",
+            body(json!({"symbol": "AAPL", "country_code": "US", "venue": "US"})),
+        ),
         (
             "get_prices",
-            body(json!({"symbols": ["AAPL", "MSFT"], "venue": "US"})),
+            body(json!({"symbols": ["AAPL", "MSFT"], "country_code": "US", "venue": "US"})),
         ),
-        ("get_atr", body(json!({"symbols": ["AAPL"], "period": 14}))),
+        (
+            "get_atr",
+            body(json!({"symbols": ["AAPL"], "country_code": "US", "period": 14})),
+        ),
         (
             "get_bars",
-            body(json!({"symbols": ["AAPL"], "sessions": 5})),
+            body(json!({"symbols": ["AAPL"], "country_code": "US", "sessions": 5})),
         ),
         ("get_service_status", body(json!({}))),
     ]

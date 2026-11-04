@@ -39,9 +39,11 @@ type Fatal = Box<dyn std::error::Error + Send + Sync>;
 
 const GET_PRICE_DESCRIPTION: &str = "\
 Latest price for ONE symbol, cached for five minutes, with the previous close and the \
-percentage move between them. `country_code` (US, AU) and `venue` (US, AU/ASX, L, TO, \
-HK, F, PA) are two spellings of the same fact -- which market the ticker is in -- and \
-`CBA` is both an ASX and a US listing, so state one. `asset_class` picks the provider: \
+percentage move between them. `country_code` (US or AU) is required and names the market: \
+`CBA` is both an ASX and a US listing, so a ticker alone does not say which tape to read. \
+`venue` (US, AU/ASX, L, TO, HK, F, PA) is an optional second spelling of the same fact and \
+must agree with it; for crypto the country is accepted and ignored, because the market is \
+CRYPTO. `asset_class` picks the provider: \
 shares (default) and indices/commodities/rates/forex go to EODHD then Yahoo; crypto goes \
 to Binance first. The answer names the provider that served it, the market it belongs \
 to and both ages -- `age_seconds` (our cache) and `as_of_age_seconds` (the vendor's \
@@ -49,8 +51,9 @@ observation, which can be older). bid/ask are always null: this vendor has no qu
 
 const GET_PRICES_DESCRIPTION: &str = "\
 Latest prices for a LIST of symbols in one call, cached for five minutes. `country_code` \
-or `venue` names the market, because a ticker is not unique across them (`CBA` is an ASX \
-listing and a US one); one request is one market, and the answer echoes `venue`. The \
+(US or AU) is required and names the market, because a ticker is not unique across them \
+(`CBA` is an ASX listing and a US one); one request is one market, and the answer echoes \
+`venue`. `venue` is an optional second spelling that must agree with the country. The \
 service picks the cheaper route itself from the list length, because the tariff breaks \
 even at 100 symbols (1 unit per symbol against 100 flat for the whole market) -- so a \
 6-symbol request and a 2,800-symbol request are both priced correctly without the caller \
@@ -59,11 +62,10 @@ cannot price come back under `missing`, not as zeros.";
 
 const GET_ATR_DESCRIPTION: &str = "\
 Average True Range for one or more symbols, from the precomputed IndicatorCache, so it \
-costs no vendor call when it has been calculated for the session. `country_code` (US, AU) \
-or `venue` (US, AU/ASX, L, TO, HK, F, PA) names the market -- the cache is keyed by it, so \
-an ASX `CBA` and a US `CBA` have separate ATRs and neither is served for the other; with \
-neither stated, a suffixed symbol such as `CBA.AU` decides and bare symbols default to US. \
-TRUE RANGE IS \
+costs no vendor call when it has been calculated for the session. `country_code` (US or \
+AU) is required and names the market -- the cache is keyed by it, so an ASX `CBA` and a US \
+`CBA` have separate ATRs and neither is served for the other; `venue` (US, AU/ASX, L, TO, \
+HK, F, PA) is an optional second spelling that must agree. TRUE RANGE IS \
 GAP-INCLUSIVE: max(High-Low, |High-PrevClose|, |Low-PrevClose|), averaged over the last N \
 bars -- the standard method, and what every existing implementation in the estate uses. \
 `method` may be 'tr' (default) or 'high_low', and `smoothing` 'simple' (default, the N-bar \
@@ -73,11 +75,11 @@ the multiplier is never defaulted, since the books use 1.0, 2.0 and 3.0.";
 
 const GET_BARS_DESCRIPTION: &str = "\
 Completed daily bars for one or more symbols, from DailySnapshot, with the vendor called \
-only when the cache is short. `country_code` (US, AU) or `venue` (US, AU/ASX, L, TO, HK, F, \
-PA) names the market, and it chooses the series: `CBA` at the ASX and `CBA` in New York are \
+only when the cache is short. `country_code` (US or AU) is required and names the market, \
+and it chooses the series: `CBA` at the ASX and `CBA` in New York are \
 different instruments, so a venue with a short series answers `short_history` rather than \
-borrowing the other one's bars. With neither stated, a suffixed symbol such as `CBA.AU` \
-decides and bare symbols default to US. The session still in progress is always excluded: \
+borrowing the other one's bars; `venue` (US, AU/ASX, L, TO, HK, F, PA) is an optional \
+second spelling that must agree. The session still in progress is always excluded: \
 a partial session has a partial range and using it shrinks a stop exactly when the morning \
 is quiet. Each answer carries `as_of_session`, `venue`, `adjusted` (whether the series is \
 split-adjusted) and `provider`. `allow_fetch=false` answers only from the cache and never \
@@ -108,10 +110,10 @@ impl MarketDataService {
 struct GetPriceArgs {
     /// The ticker, optionally with a market suffix such as `CBA.AU`.
     symbol: String,
+    /// Required: `US` or `AU`. A ticker alone does not name a market.
+    country_code: String,
     #[serde(default)]
     venue: Option<String>,
-    #[serde(default)]
-    country_code: Option<String>,
     #[serde(default)]
     asset_class: Option<String>,
     /// A cache age in seconds; a caller may only ask for something newer, never staler.
@@ -122,10 +124,10 @@ struct GetPriceArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GetPricesArgs {
     symbols: Vec<String>,
+    /// Required: `US` or `AU`. A ticker alone does not name a market.
+    country_code: String,
     #[serde(default)]
     venue: Option<String>,
-    #[serde(default)]
-    country_code: Option<String>,
     #[serde(default)]
     asset_class: Option<String>,
     #[serde(default)]
@@ -135,6 +137,8 @@ struct GetPricesArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GetAtrArgs {
     symbols: Vec<String>,
+    /// Required: `US` or `AU`. A ticker alone does not name a market.
+    country_code: String,
     #[serde(default = "default_period")]
     period: i64,
     #[serde(default)]
@@ -143,8 +147,6 @@ struct GetAtrArgs {
     smoothing: Option<String>,
     #[serde(default)]
     venue: Option<String>,
-    #[serde(default)]
-    country_code: Option<String>,
     #[serde(default)]
     asset_class: Option<String>,
     /// The price the stop is measured from. Supplying it without `multiplier` is a refusal.
@@ -160,12 +162,12 @@ struct GetAtrArgs {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct GetBarsArgs {
     symbols: Vec<String>,
+    /// Required: `US` or `AU`. A ticker alone does not name a market.
+    country_code: String,
     #[serde(default = "default_sessions")]
     sessions: i64,
     #[serde(default)]
     venue: Option<String>,
-    #[serde(default)]
-    country_code: Option<String>,
     #[serde(default)]
     asset_class: Option<String>,
     #[serde(default = "default_true")]
@@ -196,8 +198,8 @@ impl MarketDataService {
     #[tool(name = "get_price", description = GET_PRICE_DESCRIPTION)]
     async fn get_price(&self, Parameters(args): Parameters<GetPriceArgs>) -> CallToolResult {
         let mut query = Vec::new();
+        push_string(&mut query, "country_code", Some(args.country_code));
         push_string(&mut query, "venue", args.venue);
-        push_string(&mut query, "country_code", args.country_code);
         push_string(&mut query, "asset_class", args.asset_class);
         push_number(&mut query, "max_age_seconds", args.max_age_seconds);
         let path = format!("/price/{}", args.symbol);
@@ -206,9 +208,8 @@ impl MarketDataService {
 
     #[tool(name = "get_prices", description = GET_PRICES_DESCRIPTION)]
     async fn get_prices(&self, Parameters(args): Parameters<GetPricesArgs>) -> CallToolResult {
-        let mut body = json!({"symbols": args.symbols});
+        let mut body = json!({"symbols": args.symbols, "country_code": args.country_code});
         set_string(&mut body, "venue", args.venue);
-        set_string(&mut body, "country_code", args.country_code);
         set_string(&mut body, "asset_class", args.asset_class);
         set_number(&mut body, "max_age_seconds", args.max_age_seconds);
         CallToolResult::structured(self.proxy.post("/prices", &body).await)
@@ -218,11 +219,11 @@ impl MarketDataService {
     async fn get_atr(&self, Parameters(args): Parameters<GetAtrArgs>) -> CallToolResult {
         let mut body = json!({
             "symbols": args.symbols,
+            "country_code": args.country_code,
             "period": args.period,
             "direction": args.direction,
         });
         set_string(&mut body, "venue", args.venue);
-        set_string(&mut body, "country_code", args.country_code);
         set_string(&mut body, "method", args.method);
         set_string(&mut body, "smoothing", args.smoothing);
         set_string(&mut body, "asset_class", args.asset_class);
@@ -235,11 +236,11 @@ impl MarketDataService {
     async fn get_bars(&self, Parameters(args): Parameters<GetBarsArgs>) -> CallToolResult {
         let mut body = json!({
             "symbols": args.symbols,
+            "country_code": args.country_code,
             "sessions": args.sessions,
             "allow_fetch": args.allow_fetch,
         });
         set_string(&mut body, "venue", args.venue);
-        set_string(&mut body, "country_code", args.country_code);
         set_string(&mut body, "asset_class", args.asset_class);
         CallToolResult::structured(self.proxy.post("/bars", &body).await)
     }
@@ -449,6 +450,14 @@ mod tests {
         assert_eq!(default_sessions(), 15);
         assert_eq!(default_direction(), "long");
         assert!(default_true());
+    }
+
+    #[test]
+    fn every_symbol_tool_refuses_a_missing_country_code() {
+        assert!(serde_json::from_value::<GetPriceArgs>(json!({"symbol": "AAPL"})).is_err());
+        assert!(serde_json::from_value::<GetPricesArgs>(json!({"symbols": ["AAPL"]})).is_err());
+        assert!(serde_json::from_value::<GetAtrArgs>(json!({"symbols": ["AAPL"]})).is_err());
+        assert!(serde_json::from_value::<GetBarsArgs>(json!({"symbols": ["AAPL"]})).is_err());
     }
 
     #[test]

@@ -78,10 +78,11 @@ the gap is visible rather than absorbed — but visible is not the same as corre
 
 404 `{"error": "unpriced", ...}` when nothing can price it.
 
-**Send the country.** `country_code` (US, AU) and `venue` (US, AU/ASX, L, TO, HK, F, PA) are two
-spellings of the same fact, and a suffixed symbol (`CBA.AU`) is a third. A ticker is not unique
-across markets — `CBA` is an ASX listing and a US one — so a request that names neither is
-answered from the US tape by default. Stating both with different markets is a 400
+**Send the country — it is not optional.** `country_code` (US, AU) is required on every
+symbol-bearing call. `venue` (US, AU/ASX, L, TO, HK, F, PA) is an optional second spelling and
+must agree with it; a suffixed symbol (`CBA.AU`) is a third and must agree too. A ticker is
+not unique across markets — `CBA` is an ASX listing and a US one — and a request that names no
+country is refused with a 422 rather than answered from the US tape. A contradiction is 400
 `venue-conflict` rather than a preference for one.
 
 ### `POST /prices`
@@ -134,6 +135,7 @@ is harmless but it hides the fact that the guarantee lives in the service.
 |---|---|---|
 | 400 | bad request (incomplete stop, bad method, no symbols) | fix the call — it will not succeed on retry |
 | 400 `unknown-venue` / `venue-conflict` / `mixed-venues` | the market could not be resolved | fix the call: one country per request, and no suffix that contradicts it |
+| 422 | `country_code` missing or not `US`/`AU` | fix the call — the country is required, there is no default |
 | 404 | that symbol cannot be priced | mark it missing, move on |
 | 502 | the vendor refused | retry later, or fall back to the broker |
 | 503 `database-busy` | the daily load held a lock | **retry** — it is transient and short |
@@ -158,12 +160,12 @@ seconds returns immediately instead of hanging. Treat it as retryable rather tha
    market, ~2 MB). If McTrader only needs the top N movers, sort locally rather than asking for a
    narrower list — a narrower list may drop below the 100-symbol break-even and become *more*
    expensive.
-5. **Crypto uses `asset_class: "crypto"`.** A bare `venue`/`country_code` is meaningless there and
-   is ignored.
-6. **A country code is not decoration.** `CBA`, `BHP`, `BXB` are ASX tickers *and* US ones. Pass
-   `country_code` (or suffix the symbol) on `/price`, `/prices`, `/atr` and `/bars`; with neither,
-   the request is answered from the US tape. A contradiction is 400 `venue-conflict`, never a
-   silent pick.
+5. **Crypto uses `asset_class: "crypto"`.** The country is still required by the request shape
+   but is meaningless there and is ignored.
+6. **A country code is mandatory.** `CBA`, `BHP`, `BXB` are ASX tickers *and* US ones. Pass
+   `country_code` (`US` or `AU`) on every symbol-bearing call; omitting it is a 422, not a US
+   default. A suffix (`CBA.AU`) corroborates the country but does not replace it. A
+   contradiction is 400 `venue-conflict`, never a silent pick.
 
 ---
 

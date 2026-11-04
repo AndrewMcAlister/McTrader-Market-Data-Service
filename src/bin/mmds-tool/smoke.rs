@@ -27,11 +27,16 @@ pub(crate) async fn smoke_api(base: &str) -> ToolResult<()> {
     smoke.prices(&BATCH_SYMBOLS).await;
     smoke.bars(&["AAPL", "MSFT"]).await;
     smoke
-        .atr(&json!({"symbols": ["AAPL", "MSFT", "NVDA"], "period": 14}))
+        .atr(&json!({
+            "symbols": ["AAPL", "MSFT", "NVDA"],
+            "country_code": "US",
+            "period": 14
+        }))
         .await;
     smoke
         .atr(&json!({
             "symbols": ["AAPL"],
+            "country_code": "US",
             "period": 14,
             "price": 231.40,
             "multiplier": 1.0,
@@ -39,7 +44,12 @@ pub(crate) async fn smoke_api(base: &str) -> ToolResult<()> {
         }))
         .await;
     smoke
-        .atr(&json!({"symbols": ["AAPL"], "period": 14, "price": 231.40}))
+        .atr(&json!({
+            "symbols": ["AAPL"],
+            "country_code": "US",
+            "period": 14,
+            "price": 231.40
+        }))
         .await;
     smoke.price("ZZZZ").await;
     smoke.stats().await;
@@ -57,7 +67,12 @@ pub(crate) async fn smoke_providers(base: &str) -> ToolResult<()> {
     smoke.prices(&["NVDA", "SPY"]).await;
     smoke.bars_class(&["BTC-USD"], 15, "crypto").await;
     smoke
-        .atr(&json!({"symbols": ["BTC-USD"], "period": 14, "asset_class": "crypto"}))
+        .atr(&json!({
+            "symbols": ["BTC-USD"],
+            "country_code": "US",
+            "period": 14,
+            "asset_class": "crypto"
+        }))
         .await;
     smoke.router().await;
     smoke.verdict()
@@ -97,28 +112,28 @@ impl Smoke {
     }
 
     async fn price(&mut self, symbol: &str) {
-        let path = format!("/price/{symbol}");
+        let path = format!("/price/{symbol}?country_code=US");
         if let Some(payload) = self.get(&path, &format!("GET {path}")).await {
             print_quote(symbol, &payload);
         }
     }
 
     async fn price_class(&mut self, symbol: &str, asset_class: &str) {
-        let path = format!("/price/{symbol}?asset_class={asset_class}");
+        let path = format!("/price/{symbol}?country_code=US&asset_class={asset_class}");
         if let Some(payload) = self.get(&path, &format!("GET {path}")).await {
             print_quote(symbol, &payload);
         }
     }
 
     async fn prices(&mut self, symbols: &[&str]) {
-        let body = json!({"symbols": symbols, "venue": "US"});
+        let body = json!({"symbols": symbols, "country_code": "US", "venue": "US"});
         if let Some(payload) = self.post("/prices", &body, "POST /prices").await {
             print_prices(&payload);
         }
     }
 
     async fn bars(&mut self, symbols: &[&str]) {
-        let body = json!({"symbols": symbols, "sessions": 15});
+        let body = json!({"symbols": symbols, "sessions": 15, "country_code": "US"});
         if let Some(payload) = self.post("/bars", &body, "POST /bars").await {
             print_bars(&payload);
         }
@@ -128,6 +143,7 @@ impl Smoke {
         let body = json!({
             "symbols": symbols,
             "sessions": sessions,
+            "country_code": "US",
             "asset_class": asset_class
         });
         if let Some(payload) = self.post("/bars", &body, "POST /bars (crypto)").await {

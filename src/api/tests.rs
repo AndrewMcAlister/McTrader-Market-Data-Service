@@ -444,16 +444,63 @@ async fn shutdown_is_accepted_with_the_source_note() {
 
 #[tokio::test]
 async fn a_missing_product_layer_is_vendor_unavailable() {
-    let reply = call(&state(None), get("/price/TSLA")).await;
+    let reply = call(&state(None), get("/price/TSLA?country_code=US")).await;
     assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(reply.body, json!({"error": "vendor-unavailable"}));
+}
+
+#[tokio::test]
+async fn every_symbol_endpoint_refuses_a_missing_country_code() {
+    let products = FakeProducts::ok();
+    let state = state(Some(products.clone()));
+
+    let requests = [
+        (get("/price/TSLA"), json!(["query", "country_code"])),
+        (
+            post_json("/prices", json!({"symbols": ["TSLA"]})),
+            json!(["body", "country_code"]),
+        ),
+        (
+            post_json("/atr", json!({"symbols": ["TSLA"]})),
+            json!(["body", "country_code"]),
+        ),
+        (
+            post_json("/bars", json!({"symbols": ["TSLA"]})),
+            json!(["body", "country_code"]),
+        ),
+    ];
+    for (request, location) in requests {
+        let reply = call(&state, request).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reply.body["detail"][0]["loc"], location);
+        assert_eq!(reply.body["detail"][0]["type"], "missing");
+    }
+    assert!(products.calls().is_empty(), "{:?}", products.calls());
+}
+
+#[tokio::test]
+async fn an_unknown_country_code_is_refused_before_the_product_layer() {
+    let products = FakeProducts::ok();
+    let reply = call(
+        &state(Some(products.clone())),
+        post_json("/prices", json!({"symbols": ["CBA"], "country_code": "NZ"})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.body["detail"][0]["type"], "literal_error");
+    assert_eq!(reply.body["detail"][0]["input"], "NZ");
+    assert!(products.calls().is_empty());
 }
 
 #[tokio::test]
 async fn an_empty_symbol_list_is_a_422_before_the_product_layer_is_touched() {
     let products = FakeProducts::ok();
     let state = state(Some(products.clone()));
-    let reply = call(&state, post_json("/prices", json!({"symbols": []}))).await;
+    let reply = call(
+        &state,
+        post_json("/prices", json!({"symbols": [], "country_code": "US"})),
+    )
+    .await;
     assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(reply.body["detail"][0]["loc"], json!(["body", "symbols"]));
     assert!(products.calls().is_empty());
@@ -467,7 +514,7 @@ async fn an_unknown_venue_is_rendered_as_the_source_service_rendered_it() {
     )));
     let reply = call(
         &state(Some(products)),
-        post_json("/prices", json!({"symbols": ["VOD"]})),
+        post_json("/prices", json!({"symbols": ["VOD"], "country_code": "US"})),
     )
     .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
@@ -486,7 +533,10 @@ async fn a_venue_conflict_keeps_its_reason_and_status() {
     )));
     let reply = call(
         &state(Some(products)),
-        post_json("/prices", json!({"symbols": ["CBA.AU"], "venue": "US"})),
+        post_json(
+            "/prices",
+            json!({"symbols": ["CBA.AU"], "venue": "US", "country_code": "US"}),
+        ),
     )
     .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
@@ -494,13 +544,13 @@ async fn a_venue_conflict_keeps_its_reason_and_status() {
 }
 
 #[tokio::test]
-async fn country_code_and_asset_class_reach_the_product_layer_unchanged() {
+async fn the_country_code_is_normalised_before_it_reaches_the_product_layer() {
     let products = FakeProducts::ok();
     let reply = call(
         &state(Some(products.clone())),
         post_json(
             "/prices",
-            json!({"symbols": ["CBA.AU"], "country_code": "au", "asset_class": "shares"}),
+            json!({"symbols": ["CBA.AU"], "country_code": " au ", "asset_class": "shares"}),
         ),
     )
     .await;
@@ -508,7 +558,7 @@ async fn country_code_and_asset_class_reach_the_product_layer_unchanged() {
     assert_eq!(reply.body["venue"], "US");
     assert_eq!(
         products.calls(),
-        vec!["prices:[\"CBA.AU\"]:None:None:Some(\"shares\"):Some(\"au\")"]
+        vec!["prices:[\"CBA.AU\"]:None:None:Some(\"shares\"):Some(\"AU\")"]
     );
 }
 
@@ -517,14 +567,14 @@ async fn bars_default_sessions_and_fetch_flag_match_the_contract() {
     let products = FakeProducts::ok();
     let reply = call(
         &state(Some(products.clone())),
-        post_json("/bars", json!({"symbols": ["TSLA"]})),
+        post_json("/bars", json!({"symbols": ["TSLA"], "country_code": "US"})),
     )
     .await;
     assert_eq!(reply.status, StatusCode::OK);
     assert_eq!(reply.body["requested_sessions"], 15);
     let calls = products.calls();
     assert!(
-        calls[0].starts_with("bars:[\"TSLA\"]:15:None:true:None:None"),
+        calls[0].starts_with("bars:[\"TSLA\"]:15:None:true:None:Some(\"US\")"),
         "{calls:?}"
     );
 }
@@ -533,7 +583,10 @@ async fn bars_default_sessions_and_fetch_flag_match_the_contract() {
 async fn bars_refuses_a_zero_session_count_as_a_422() {
     let reply = call(
         &state(Some(FakeProducts::ok())),
-        post_json("/bars", json!({"symbols": ["TSLA"], "sessions": 0})),
+        post_json(
+            "/bars",
+            json!({"symbols": ["TSLA"], "sessions": 0, "country_code": "US"}),
+        ),
     )
     .await;
     assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -548,7 +601,10 @@ async fn a_price_without_a_multiplier_keeps_the_incomplete_stop_refusal() {
     )));
     let reply = call(
         &state(Some(products)),
-        post_json("/atr", json!({"symbols": ["TSLA"], "price": 101.5})),
+        post_json(
+            "/atr",
+            json!({"symbols": ["TSLA"], "price": 101.5, "country_code": "US"}),
+        ),
     )
     .await;
     assert_eq!(reply.status, StatusCode::BAD_REQUEST);
@@ -567,7 +623,7 @@ async fn the_get_price_query_reaches_the_product_layer() {
     assert_eq!(reply.body["symbol"], "tsla");
     assert_eq!(
         products.calls(),
-        vec!["price:tsla:Some(\"US\"):Some(60.0):Some(\"shares\"):Some(\"us\")"]
+        vec!["price:tsla:Some(\"US\"):Some(60.0):Some(\"shares\"):Some(\"US\")"]
     );
 }
 
@@ -747,14 +803,30 @@ async fn a_manual_run_answers_409_when_it_refused() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
+async fn the_today_endpoints_require_a_country_code() {
+    let state = state(None);
+    for path in ["/todays-data-is-available", "/todays-big-movers"] {
+        let reply = call(&state, get(path)).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{path}");
+        assert_eq!(
+            reply.body["detail"][0]["loc"],
+            json!(["query", "country_code"]),
+            "{path}"
+        );
+        assert_eq!(reply.body["detail"][0]["type"], "missing", "{path}");
+    }
+}
+
+#[tokio::test]
 async fn an_unknown_country_is_refused_before_the_store_is_read() {
     let reply = call(
         &state(None),
         get("/todays-data-is-available?country_code=zz"),
     )
     .await;
-    assert_eq!(reply.status, StatusCode::BAD_REQUEST);
-    assert!(reply.body["error"].as_str().unwrap().contains("zz"));
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.body["detail"][0]["type"], "literal_error");
+    assert_eq!(reply.body["detail"][0]["input"], "zz");
 }
 
 #[tokio::test]

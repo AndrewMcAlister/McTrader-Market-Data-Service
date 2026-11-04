@@ -85,19 +85,21 @@ impl fmt::Display for CountryError {
 
 impl std::error::Error for CountryError {}
 
+/// The country a code names, trimmed and case-insensitively, or `None`.
+pub fn find_country(country_code: &str) -> Option<&'static Country> {
+    let key = country_code.trim().to_uppercase();
+    COUNTRIES.iter().find(|country| country.key == key)
+}
+
 /// The country a code names; `us`, `US`, ` au ` all work, anything else is an error.
 pub fn country_key(country_code: &str) -> Result<&'static Country, CountryError> {
-    let key = country_code.trim().to_uppercase();
-    COUNTRIES
-        .iter()
-        .find(|country| country.key == key)
-        .ok_or_else(|| CountryError {
-            // Python's `str(KeyError(message))` is the repr of the message, quotes included.
-            message: py_repr(&format!(
-                "country code must be one of ['AU', 'US'], got {}",
-                py_repr(country_code)
-            )),
-        })
+    find_country(country_code).ok_or_else(|| CountryError {
+        // Python's `str(KeyError(message))` is the repr of the message, quotes included.
+        message: py_repr(&format!(
+            "country code must be one of ['AU', 'US'], got {}",
+            py_repr(country_code)
+        )),
+    })
 }
 
 /// A stored stamp as UTC.

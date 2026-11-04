@@ -13,11 +13,11 @@ use axum::Json;
 use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
 
-use crate::domain::availability::{check, country_key, ExchangeSession};
+use crate::domain::availability::{check, ExchangeSession};
 use crate::store::models::Mover;
 use crate::usage::with_caller;
 
-use super::dto::{require_limit, require_non_negative, CountryQuery, MoversQuery};
+use super::dto::{require_country, require_limit, require_non_negative, CountryQuery, MoversQuery};
 use super::errors::ApiError;
 use super::request::caller;
 use super::state::AppState;
@@ -29,12 +29,11 @@ pub async fn get_availability(
 ) -> Response {
     let attributed = caller(&headers);
     with_caller(attributed.as_deref(), async {
-        let country = match country_key(&query.country_code) {
-            Ok(country) => country,
-            Err(error) => {
-                return ApiError::reason(StatusCode::BAD_REQUEST, error.message).into_response()
-            }
-        };
+        let country =
+            match require_country(query.country_code.as_deref(), &["query", "country_code"]) {
+                Ok(country) => country,
+                Err(error) => return error.into_response(),
+            };
         let Some(store) = state.store() else {
             return ApiError::database_unavailable().into_response();
         };
@@ -120,12 +119,11 @@ pub async fn get_big_movers(
         if let Err(error) = require_non_negative("min_dollar_volume", query.min_dollar_volume) {
             return error.into_response();
         }
-        let country = match country_key(&query.country_code) {
-            Ok(country) => country,
-            Err(error) => {
-                return ApiError::reason(StatusCode::BAD_REQUEST, error.message).into_response()
-            }
-        };
+        let country =
+            match require_country(query.country_code.as_deref(), &["query", "country_code"]) {
+                Ok(country) => country,
+                Err(error) => return error.into_response(),
+            };
         let Some(store) = state.store() else {
             return ApiError::database_unavailable().into_response();
         };

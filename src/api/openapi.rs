@@ -194,7 +194,7 @@ pub fn document() -> Value {
                     "parameters": [country_parameter()],
                     "responses": {
                         "200": {"description": "A bare boolean", "content": {"application/json": {"schema": {"type": "boolean"}}}},
-                        "400": {"description": "Unknown country", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}},
                         "503": {"description": "No database is configured", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
                     }
                 }
@@ -212,7 +212,7 @@ pub fn document() -> Value {
                     ],
                     "responses": {
                         "200": {"description": "Ranked movers, or an explicit not-available answer", "content": {"application/json": {"schema": {"type": "object"}}}},
-                        "400": {"description": "Unknown country or out-of-range filter", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}},
                         "503": {"description": "No database or unreadable cache", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
                     }
                 }
@@ -224,14 +224,15 @@ pub fn document() -> Value {
                     "operationId": "get_price_price__symbol__get",
                     "parameters": [
                         {"name": "symbol", "in": "path", "required": true, "schema": {"type": "string"}},
+                        {"name": "country_code", "in": "query", "required": true, "schema": {"type": "string", "enum": ["US", "AU"]}, "description": "The country the ticker belongs to; required"},
                         {"name": "venue", "in": "query", "required": false, "schema": {"type": ["string", "null"]}},
-                        {"name": "country_code", "in": "query", "required": false, "schema": {"type": ["string", "null"]}},
                         {"name": "max_age_seconds", "in": "query", "required": false, "schema": {"type": ["number", "null"]}},
                         {"name": "asset_class", "in": "query", "required": false, "schema": {"type": ["string", "null"]}}
                     ],
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
                         "400": {"description": "Venue or symbol refusal", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}},
                         "502": {"description": "Every provider refused", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
                         "503": {"description": "No product layer or busy database", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
                     }
@@ -305,12 +306,12 @@ pub fn document() -> Value {
                     "type": "object",
                     "properties": {
                         "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Bare or suffixed symbols"},
+                        "country_code": {"type": "string", "enum": ["US", "AU"], "description": "The country the tickers belong to; required"},
                         "venue": {"type": ["string", "null"]},
-                        "country_code": {"type": ["string", "null"]},
                         "max_age_seconds": {"type": ["number", "null"]},
                         "asset_class": {"type": ["string", "null"]}
                     },
-                    "required": ["symbols"]
+                    "required": ["symbols", "country_code"]
                 },
                 "AtrRequest": {
                     "type": "object",
@@ -319,26 +320,26 @@ pub fn document() -> Value {
                         "period": {"type": ["integer", "null"], "description": "Default 14"},
                         "method": {"type": ["string", "null"], "description": "gap (default) or high_low"},
                         "smoothing": {"type": ["string", "null"], "description": "simple (default) or wilder"},
+                        "country_code": {"type": "string", "enum": ["US", "AU"], "description": "The country the tickers belong to; required"},
                         "venue": {"type": ["string", "null"]},
-                        "country_code": {"type": ["string", "null"]},
                         "price": {"type": ["number", "null"]},
                         "multiplier": {"type": ["number", "null"]},
                         "direction": {"type": ["string", "null"], "description": "'long' (default) or 'short'"},
                         "asset_class": {"type": ["string", "null"]}
                     },
-                    "required": ["symbols"]
+                    "required": ["symbols", "country_code"]
                 },
                 "BarsRequest": {
                     "type": "object",
                     "properties": {
                         "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                         "sessions": {"type": "integer", "minimum": 1, "default": 15, "description": "Completed sessions to return"},
+                        "country_code": {"type": "string", "enum": ["US", "AU"], "description": "The country the tickers belong to; required"},
                         "venue": {"type": ["string", "null"]},
-                        "country_code": {"type": ["string", "null"]},
                         "allow_fetch": {"type": "boolean", "default": true},
                         "asset_class": {"type": ["string", "null"]}
                     },
-                    "required": ["symbols"]
+                    "required": ["symbols", "country_code"]
                 },
                 "EodhdKeyRequest": {
                     "type": "object",
@@ -366,8 +367,9 @@ pub fn document() -> Value {
 }
 
 fn country_parameter() -> Value {
-    json!({"name": "country_code", "in": "query", "required": false,
-           "schema": {"type": "string", "default": "US"}, "description": "us/US or au/AU"})
+    json!({"name": "country_code", "in": "query", "required": true,
+           "schema": {"type": "string", "enum": ["US", "AU"]},
+           "description": "Country code: us/US or au/AU; required"})
 }
 
 fn admin_token_parameter() -> Value {

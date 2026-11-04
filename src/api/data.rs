@@ -14,7 +14,8 @@ use crate::products::AtrRequest;
 use crate::usage::with_caller;
 
 use super::dto::{
-    require_sessions, require_symbols, AtrRequestBody, BarsRequestBody, PriceQuery, PricesRequest,
+    require_country, require_sessions, require_symbols, AtrRequestBody, BarsRequestBody,
+    PriceQuery, PricesRequest,
 };
 use super::errors::ApiError;
 use super::request::caller;
@@ -26,6 +27,10 @@ pub async fn get_price(
     Query(query): Query<PriceQuery>,
     headers: HeaderMap,
 ) -> Response {
+    let country = match require_country(query.country_code.as_deref(), &["query", "country_code"]) {
+        Ok(country) => country,
+        Err(error) => return error.into_response(),
+    };
     let attributed = caller(&headers);
     let outcome = with_caller(attributed.as_deref(), async {
         let Some(products) = state.products() else {
@@ -37,7 +42,7 @@ pub async fn get_price(
                 query.venue.as_deref(),
                 query.max_age_seconds,
                 query.asset_class.as_deref(),
-                query.country_code.as_deref(),
+                Some(country.key),
             )
             .await
             .map_err(ApiError::from)
@@ -57,6 +62,10 @@ pub async fn post_prices(
     if let Err(error) = require_symbols(&body.symbols) {
         return error.into_response();
     }
+    let country = match require_country(body.country_code.as_deref(), &["body", "country_code"]) {
+        Ok(country) => country,
+        Err(error) => return error.into_response(),
+    };
     let attributed = caller(&headers);
     let outcome = with_caller(attributed.as_deref(), async {
         let Some(products) = state.products() else {
@@ -68,7 +77,7 @@ pub async fn post_prices(
                 body.venue.as_deref(),
                 body.max_age_seconds,
                 body.asset_class.as_deref(),
-                body.country_code.as_deref(),
+                Some(country.key),
             )
             .await
             .map_err(ApiError::from)
@@ -88,6 +97,10 @@ pub async fn post_atr(
     if let Err(error) = require_symbols(&body.symbols) {
         return error.into_response();
     }
+    let country = match require_country(body.country_code.as_deref(), &["body", "country_code"]) {
+        Ok(country) => country,
+        Err(error) => return error.into_response(),
+    };
     let attributed = caller(&headers);
     let outcome = with_caller(attributed.as_deref(), async {
         let Some(products) = state.products() else {
@@ -105,7 +118,7 @@ pub async fn post_atr(
                 direction: body.direction.as_deref().unwrap_or("long"),
                 allow_fetch: true,
                 asset_class: body.asset_class.as_deref(),
-                country_code: body.country_code.as_deref(),
+                country_code: Some(country.key),
             })
             .await
             .map_err(ApiError::from)
@@ -128,6 +141,10 @@ pub async fn post_bars(
     if let Err(error) = require_sessions(body.sessions) {
         return error.into_response();
     }
+    let country = match require_country(body.country_code.as_deref(), &["body", "country_code"]) {
+        Ok(country) => country,
+        Err(error) => return error.into_response(),
+    };
     let attributed = caller(&headers);
     let outcome = with_caller(attributed.as_deref(), async {
         let Some(products) = state.products() else {
@@ -140,7 +157,7 @@ pub async fn post_bars(
                 body.venue.as_deref(),
                 body.allow_fetch,
                 body.asset_class.as_deref(),
-                body.country_code.as_deref(),
+                Some(country.key),
             )
             .await
             .map_err(ApiError::from)

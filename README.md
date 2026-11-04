@@ -92,18 +92,21 @@ what to delete in McTrader.
 
 ## The four endpoints
 
-Every endpoint that takes a symbol also takes the market, because a ticker is not unique across
-exchanges (`CBA` is an ASX listing *and* a US one). Say it with `country_code` (`US`, `AU`), with
-`venue` (`US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`) or in the symbol itself (`CBA.AU`).
-A stated country/venue wins, then the suffix, then `US`; a contradiction is a 400
-(`venue-conflict`), because serving either market silently is how two venues' prices get mixed.
+Every endpoint that takes a symbol also **requires** `country_code` — `US` or `AU` — because a
+ticker is not unique across exchanges (`CBA` is an ASX listing *and* a US one) and a request that
+does not say which market it means has no safe answer. A missing country is a 422, never a
+silent US default; an unknown one is a 422 that names the countries the service serves.
+`venue` (`US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`) is an optional second spelling of
+the same fact and must agree with the country; a contradiction is a 400 (`venue-conflict`),
+because serving either market silently is how two venues' prices get mixed. For
+`asset_class: "crypto"` the country is accepted and ignored: the market is `CRYPTO`.
 Every answer states the market it used.
 
 ### `GET /price/{symbol}`
 
 ```
 GET /price/AAPL?country_code=US
-GET /price/CBA?country_code=AU        # or /price/CBA.AU
+GET /price/CBA?country_code=AU        # a suffix must agree: /price/CBA.AU?country_code=AU
 ```
 ```json
 {
@@ -152,8 +155,8 @@ minute, and caching the failure would hide a recovery.
 ### `POST /atr`
 
 ```json
-{ "symbols": ["AAPL"], "period": 14, "method": "tr", "smoothing": "simple",
-  "price": 231.4, "multiplier": 1.0, "direction": "long" }
+{ "symbols": ["AAPL"], "country_code": "US", "period": 14, "method": "tr",
+  "smoothing": "simple", "price": 231.4, "multiplier": 1.0, "direction": "long" }
 ```
 ```json
 {
@@ -182,8 +185,8 @@ definition cannot be reproduced.
 
 **The ATR is one venue's ATR.** `IndicatorCache` is keyed by `(symbol, exchange)`, so an ASX
 `CBA` is never served the US `CBA`'s volatility — which, with a symbol-only key, is exactly
-what would have happened. `country_code` (or `venue`, or a `CBA.AU` suffix) is what picks the
-series, and `venue` is echoed at the top of the response.
+what would have happened. `country_code` is what picks the series, and `venue` is echoed at the
+top of the response.
 
 ### `POST /bars`
 
@@ -205,10 +208,10 @@ series, and `venue` is echoed at the top of the response.
 }
 ```
 
-`country_code`/`venue` selects which series is read, because `DailySnapshot` is keyed by
+`country_code` selects which series is read, because `DailySnapshot` is keyed by
 exchange: `AAPL` at `AU` is a different instrument from `AAPL` at `US`, not a misspelling to
 fall back from. A venue whose series is short answers `short_history`; it does not borrow the
-other venue's bars. A suffixed symbol (`CBA.AU`) states the same thing when no country is sent.
+other venue's bars. A suffixed symbol (`CBA.AU`) must agree with the country that came with it.
 
 The session in progress is **dropped here**, in the service, not by each caller — a partial
 session has a partial range and using it shrinks a stop exactly when the morning is quiet.
@@ -526,7 +529,7 @@ and a call that vanished would be the accounting hole these tables exist to clos
 Every data endpoint attributes its spend to the `X-MarketData-Caller` header, falling back to the path:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8003/price/AAPL -Headers @{ 'X-MarketData-Caller' = 'minictrader' }
+Invoke-RestMethod 'http://127.0.0.1:8003/price/AAPL?country_code=US' -Headers @{ 'X-MarketData-Caller' = 'minictrader' }
 ```
 
 ```
@@ -1063,9 +1066,9 @@ declared rather than hidden. Verified with the key removed:
 
 | Call | With no key |
 |---|---|
-| `/price/BTC-USD?asset_class=crypto` | `provider=binance` |
-| `/price/IXIC?asset_class=indices` | `provider=yahoo` |
-| `/price/AAPL` | `provider=yahoo` — degraded, and declared |
+| `/price/BTC-USD?asset_class=crypto&country_code=US` | `provider=binance` |
+| `/price/IXIC?asset_class=indices&country_code=US` | `provider=yahoo` |
+| `/price/AAPL?country_code=US` | `provider=yahoo` — degraded, and declared |
 | `/prices` above 100 symbols | per-symbol, because the bulk feed is EODHD-only |
 
 #### Protecting the write
@@ -1148,6 +1151,7 @@ Run it by hand to check before installing:
 | SQL authentication | `MDS_DB_TRUSTED=0` now works, using optional `MDS_DB_USER` / `MDS_DB_PASSWORD` |
 | `/secrets/eodhd` `backend` | reports the Rust credential-store backend instead of `WinVaultKeyring`; informational |
 | `/secrets/eodhd` surface | `DELETE` is removed, and `POST` is set-once: it answers 409 `key-already-set` when a key is already configured, so the key can only be set over HTTP when none exists |
+| `country_code` requirement | required on `/price`, `/prices`, `/atr`, `/bars`, `/todays-data-is-available` and `/todays-big-movers`; missing or unknown is a 422, where the Python service defaulted a bare symbol to US |
 | OpenAPI document | generated by utoipa; paths, methods and fields match, but descriptions and ordering may differ from FastAPI's |
 | JSON numbers | parsed values match; textual formatting of floats may differ |
 | Request validation (body) | DTO refusals (`/bars`, `/prices`, `/atr`) are 422 with FastAPI's `{"detail":[...]}` shape; the `msg` text is not pydantic's |

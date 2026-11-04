@@ -40,7 +40,9 @@ pub(crate) async fn check_index_quote(base: &str) -> ToolResult<()> {
     let mut implausible = 0usize;
 
     for (symbol, asset_class) in INDEX_PROBES {
-        let path = format!("/price/{symbol}?asset_class={asset_class}&max_age_seconds=0.001");
+        let path = format!(
+            "/price/{symbol}?country_code=US&asset_class={asset_class}&max_age_seconds=0.001"
+        );
         let reply = api.get(&path, PROBE_TIMEOUT).await?;
         let Some(payload) = reply.json() else {
             println!(
@@ -112,7 +114,7 @@ pub(crate) async fn probe_bulk_route(base: &str) -> ToolResult<()> {
     let reply = api
         .post(
             "/prices",
-            &json!({"symbols": symbols, "venue": "US"}),
+            &json!({"symbols": symbols, "country_code": "US", "venue": "US"}),
             BULK_TIMEOUT,
         )
         .await?;
@@ -180,7 +182,12 @@ pub(crate) async fn probe_responsiveness(base: &str) -> ToolResult<()> {
         let api = api.clone();
         set.spawn(async move { timed_get(&api, "/healthz").await });
     }
-    let bars = timed_post(&api, "/bars", &json!({"symbols": ["AAPL"], "sessions": 15})).await;
+    let bars = timed_post(
+        &api,
+        "/bars",
+        &json!({"symbols": ["AAPL"], "sessions": 15, "country_code": "US"}),
+    )
+    .await;
     let mut concurrent = Vec::new();
     while let Some(result) = set.join_next().await {
         concurrent.push(result?);

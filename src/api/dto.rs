@@ -9,11 +9,48 @@ use chrono::NaiveDate;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::domain::availability::{find_country, Country, COUNTRIES};
+
 use super::errors::ApiError;
 
 /// The FastAPI-shaped refusal for a value outside a declared bound.
 pub fn validation(location: &[&str], kind: &str, message: &str, input: Value) -> ApiError {
     ApiError::validation(location, kind, message, input)
+}
+
+/// The country a request names, or the FastAPI-shaped refusal for a missing or unknown one.
+///
+/// `country_code` is required on every symbol-bearing call: a ticker alone does not name a
+/// market (`CBA` is an ASX listing *and* a US one), and answering a request that named no
+/// market from the US tape is exactly the silent wrong number the field exists to prevent.
+/// The accepted set is the country table the availability endpoints already read, so `US` and
+/// `AU` are the only answers today and adding a country there adds it here.
+pub fn require_country(
+    value: Option<&str>,
+    location: &[&str],
+) -> Result<&'static Country, ApiError> {
+    let text = value.map(str::trim).unwrap_or_default();
+    if text.is_empty() {
+        return Err(validation(
+            location,
+            "missing",
+            "Field required",
+            Value::Null,
+        ));
+    }
+    find_country(text).ok_or_else(|| {
+        let expected = COUNTRIES
+            .iter()
+            .map(|country| format!("'{}'", country.key))
+            .collect::<Vec<_>>()
+            .join(" or ");
+        validation(
+            location,
+            "literal_error",
+            &format!("Input should be {expected}"),
+            json!(text),
+        )
+    })
 }
 
 /// At least one symbol, as `min_length=1` required.
@@ -250,15 +287,17 @@ pub struct TradingSessionsQuery {
 /// `GET /todays-data-is-available`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CountryQuery {
-    #[serde(default = "default_market")]
-    pub country_code: String,
+    /// Required; `None` is what the handler refuses as a 422 rather than silently reading US.
+    #[serde(default)]
+    pub country_code: Option<String>,
 }
 
 /// `GET /todays-big-movers`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct MoversQuery {
-    #[serde(default = "default_market")]
-    pub country_code: String,
+    /// Required; see [`CountryQuery::country_code`].
+    #[serde(default)]
+    pub country_code: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: i64,
     #[serde(default = "default_min_price")]
@@ -318,5 +357,46 @@ mod tests {
         assert!(require_limit(25).is_ok());
         assert!(require_non_negative("min_price", 0.0).is_ok());
         assert!(require_non_negative("min_price", -1.0).is_err());
+    }
+
+    #[test]
+    fn a_missing_country_code_is_a_422_naming_the_field() {
+        let error = require_country(None, &["query", "country_code"]).unwrap_err();
+        assert_eq!(error.status, 422);
+        assert_eq!(
+            error.body["detail"][0]["loc"],
+            json!(["query", "country_code"])
+        );
+        assert_eq!(error.body["detail"][0]["type"], "missing");
+
+        let blank = require_country(Some("   "), &["body", "country_code"]).unwrap_err();
+        assert_eq!(blank.body["detail"][0]["type"], "missing");
+    }
+
+    #[test]
+    fn a_country_code_is_trimmed_case_insensitively_and_narrowed_to_the_table() {
+        assert_eq!(
+            require_country(Some(" au "), &["body", "country_code"])
+                .unwrap()
+                .key,
+            "AU"
+        );
+        assert_eq!(
+            require_country(Some("US"), &["body", "country_code"])
+                .unwrap()
+                .key,
+            "US"
+        );
+    }
+
+    #[test]
+    fn an_unknown_country_code_lists_the_countries_that_are_served() {
+        let error = require_country(Some("NZ"), &["body", "country_code"]).unwrap_err();
+        assert_eq!(error.status, 422);
+        assert_eq!(error.body["detail"][0]["type"], "literal_error");
+        let message = error.body["detail"][0]["msg"].as_str().unwrap();
+        assert!(message.contains("'US'"), "{message}");
+        assert!(message.contains("'AU'"), "{message}");
+        assert_eq!(error.body["detail"][0]["input"], json!("NZ"));
     }
 }

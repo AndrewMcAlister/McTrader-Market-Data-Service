@@ -16,18 +16,22 @@ the proof that the decision still lives in that file.
 
 - **Location:** `src/domain/venues.rs` · `fn resolve_venue(`
 - **Gates:** Every symbol endpoint — which market a ticker names.
-- **Trigger:** A stated `venue`/`country_code` that conflicts with the symbol's suffix; a batch
-  mixing suffixes; an unknown venue code.
-- **Clear:** State one market per request, or suffix every symbol the same way. Bare symbols
-  resolve to `US`; `asset_class=crypto` resolves to `CRYPTO`.
+- **Trigger:** A missing `country_code` (the HTTP layer answers 422); a stated
+  `venue`/`country_code` that conflicts with the symbol's suffix; a batch mixing suffixes; an
+  unknown venue code.
+- **Clear:** Send `country_code` — `US` or `AU` — with bare symbols, or suffix every symbol the
+  same way and state the matching country. `asset_class=crypto` resolves to `CRYPTO` (the
+  country is required by the request shape but ignored).
 - **Config:** none.
 - **Tests:** `src/domain/venues.rs` · `venue_and_country_code_that_disagree_are_refused`
 
 `CBA` is both an ASX listing and a US listing. Serving one for the other returns a plausible
 price for the wrong instrument, which is indistinguishable from a correct answer to a caller.
-The precedence is stated market → symbol suffix → `US`; a conflict is a refusal
-(`unknown-venue`, `venue-conflict`, `mixed-venues`), never a guess. Crypto has no market and
-ignores any venue passed with it.
+The HTTP layer requires `country_code` (`US`/`AU`) on every symbol-bearing endpoint, so a
+missing or unknown one is a 422 before this resolver runs. The precedence is stated market →
+symbol suffix → `US`; the last is now reachable only by internal callers. A conflict is a
+refusal (`unknown-venue`, `venue-conflict`, `mixed-venues`), never a guess. Crypto has no
+market and ignores any venue passed with it.
 
 ## G-02 · Settled sessions only
 

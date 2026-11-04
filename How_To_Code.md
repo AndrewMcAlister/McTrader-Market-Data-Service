@@ -10,6 +10,8 @@ For code that we own and control:
 No fallbacks
 No legacy paths
 No feature duplication
+No legacy client support
+No backward compatibility
 
 For external dependencies that may be unavailable or unreliable (market data, broker APIs, databases, web services, third-party systems), fallbacks and resiliency mechanisms are encouraged.
 

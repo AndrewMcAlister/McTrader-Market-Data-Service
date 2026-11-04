@@ -31,7 +31,7 @@ McTrader      ─┘        │
 > **Three names, deliberately different.** The repository is `McTrader-Market-Data-Service`; the
 > Windows service and the product are `McTrader_Market_Data_Service` — unchanged, so SCM scripts
 > and log shipping keep working. The Rust crate is `mmds`, and the binaries are `mmds-service`,
-> `mmds-daily`, `mmds-clock`, `mmds-mcp` and `mmds-tool`.
+> `mmds-daily`, `mmds-mcp` and `mmds-tool`.
 
 ---
 
@@ -41,7 +41,7 @@ McTrader      ─┘        │
 src/
   config.rs              settings, environment parsing, key resolution
   error.rs               typed errors and their HTTP rendering
-  domain/                pure rules: ATR, sessions, venues, availability, symbols, asset classes
+  domain/                pure rules: ATR, sessions, exchanges, availability, symbols, asset classes
   clock.rs               dual market clock (dbo.Exchanges + data/clock.json fallback)
   store/                 tiberius pool, schema, repositories, SQL builders
   providers/             EODHD, Yahoo, Binance and the per-asset-class router
@@ -52,19 +52,17 @@ src/
   schedule.rs            in-process US/AU collection state machine
   api/                   axum router, DTOs, extractors, error rendering, OpenAPI
   mcp.rs                 MCP proxy tools
-  guards/                named guard functions, indexed by docs/GUARD_CATALOGUE.md
   jobs/                  bulk pull, BarHourly seed, RawClose fill, indicator rebuild
   bin/
     mmds-service.rs      Windows service host: logging, startup checks, HTTP serve, shutdown
     mmds-daily.rs        bulk load / seed / raw-close fill / indicator rebuild CLI
-    mmds-clock.rs        market-clock diagnostic
     mmds-mcp.rs          stdio + streamable-http MCP proxy
-    mmds-tool.rs         operator subcommands (apply-schema, probes, copy-exchanges, ...)
+    mmds-tool.rs         operator subcommands (apply-schema, probes, copy-exchanges, check-mcp, ...)
 sql/                     schema and index scripts, reused verbatim from the reference
 data/clock.json          broker and exchange reference data
-tests/                   API contract, SQL integration (ignored by default), parity
-scripts/                 launchers, installers and the parity harness
-docs/                    GUARD_CATALOGUE.md
+tests/                   API contract, SQL integration (ignored by default)
+scripts/                 launchers and installers
+docs/                    GUARD_CATALOGUE.md: every spending/serving decision and its one location
 INTERFACE.md             the frozen external contract
 WIRING.md                the integration checklist
 ```
@@ -94,22 +92,28 @@ what to delete in McTrader.
 
 ## The four endpoints
 
-Every endpoint that takes a symbol also takes the market, because a ticker is not unique across
-exchanges (`CBA` is an ASX listing *and* a US one). Say it with `country_code` (`US`, `AU`), with
-`venue` (`US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`) or in the symbol itself (`CBA.AU`).
-A stated country/venue wins, then the suffix, then `US`; a contradiction is a 400
-(`venue-conflict`), because serving either market silently is how two venues' prices get mixed.
+Every endpoint that takes a symbol also **requires** `country_code` — `US` or `AU` — because a
+ticker is not unique across exchanges (`CBA` is an ASX listing *and* a US one) and a request that
+does not say which market it means has no safe answer. A missing country is a 422, never a
+silent US default; an unknown one is a 422 that names the countries the service serves.
+`exchange` (`US`, `AU`/`ASX`, `L`/`LSE`, `TO`, `HK`, `F`, `PA`) is an optional second spelling of
+the same fact and must agree with the country; a contradiction is a 400 (`exchange-conflict`),
+because serving either market silently is how two exchanges' prices get mixed.
 Every answer states the market it used.
+
+There is no asset-class parameter. The vendor taxonomy proved unreliable, so every symbol is
+priced as a share and takes the EODHD → Yahoo route; crypto and indices are not selectable
+through this API.
 
 ### `GET /price/{symbol}`
 
 ```
 GET /price/AAPL?country_code=US
-GET /price/CBA?country_code=AU        # or /price/CBA.AU
+GET /price/CBA?country_code=AU        # a suffix must agree: /price/CBA.AU?country_code=AU
 ```
 ```json
 {
-  "symbol": "AAPL", "venue": "US", "price": 231.4, "previous_close": 229.1, "change_pct": 1.004,
+  "symbol": "AAPL", "exchange": "US", "price": 231.4, "previous_close": 229.1, "change_pct": 1.004,
   "bid": null, "ask": null,
   "provider": "eodhd", "fetched_at": "2026-10-29T02:41:07", "age_seconds": 0.4,
   "as_of": "2026-10-29T02:40:31", "as_of_age_seconds": 36.2
@@ -131,7 +135,7 @@ quote side.
 ```json
 {
   "quotes": { "AAPL": { "...": "..." }, "MSFT": { "...": "..." } },
-  "venue": "US",
+  "exchange": "US",
   "fetched": ["AAPL", "MSFT"], "missing": [], "deferred": [],
   "complete": true, "route": "per_symbol", "requested": 2, "count": 2
 }
@@ -154,8 +158,8 @@ minute, and caching the failure would hide a recovery.
 ### `POST /atr`
 
 ```json
-{ "symbols": ["AAPL"], "period": 14, "method": "tr", "smoothing": "simple",
-  "price": 231.4, "multiplier": 1.0, "direction": "long" }
+{ "symbols": ["AAPL"], "country_code": "US", "period": 14, "method": "tr",
+  "smoothing": "simple", "price": 231.4, "multiplier": 1.0, "direction": "long" }
 ```
 ```json
 {
@@ -167,7 +171,7 @@ minute, and caching the failure would hide a recovery.
       "source": "indicator_cache", "reason": null, "stop_level": 225.58
     }
   },
-  "venue": "US",
+  "exchange": "US",
   "period": 14, "method": "tr", "smoothing": "simple", "complete": true
 }
 ```
@@ -182,10 +186,10 @@ definition cannot be reproduced.
   multiplier is never defaulted: the four books use 1.0, 1.0, 2.0 and 3.0, so a default would
   silently impose one book's risk on another's.
 
-**The ATR is one venue's ATR.** `IndicatorCache` is keyed by `(symbol, exchange)`, so an ASX
+**The ATR is one exchange's ATR.** `IndicatorCache` is keyed by `(symbol, exchange)`, so an ASX
 `CBA` is never served the US `CBA`'s volatility — which, with a symbol-only key, is exactly
-what would have happened. `country_code` (or `venue`, or a `CBA.AU` suffix) is what picks the
-series, and `venue` is echoed at the top of the response.
+what would have happened. `country_code` is what picks the series, and `exchange` is echoed at the
+top of the response.
 
 ### `POST /bars`
 
@@ -196,7 +200,7 @@ series, and `venue` is echoed at the top of the response.
 {
   "bars": {
     "AAPL": {
-      "symbol": "AAPL", "venue": "US",
+      "symbol": "AAPL", "exchange": "US",
       "as_of_session": "2026-10-14", "sessions": 15, "adjusted": true,
       "provider": "cache", "source": "cache",
       "rows": [ { "d": "2026-09-24", "o": 250.1, "h": 254.9, "l": 249.2,
@@ -207,10 +211,10 @@ series, and `venue` is echoed at the top of the response.
 }
 ```
 
-`country_code`/`venue` selects which series is read, because `DailySnapshot` is keyed by
+`country_code` selects which series is read, because `DailySnapshot` is keyed by
 exchange: `AAPL` at `AU` is a different instrument from `AAPL` at `US`, not a misspelling to
-fall back from. A venue whose series is short answers `short_history`; it does not borrow the
-other venue's bars. A suffixed symbol (`CBA.AU`) states the same thing when no country is sent.
+fall back from. An exchange whose series is short answers `short_history`; it does not borrow the
+other exchange's bars. A suffixed symbol (`CBA.AU`) must agree with the country that came with it.
 
 The session in progress is **dropped here**, in the service, not by each caller — a partial
 session has a partial range and using it shrinks a stop exactly when the morning is quiet.
@@ -227,18 +231,18 @@ symbol from the vendor once and names it in `fetched`.
 - `GET /stats` — row counts, cache hit/fetch counters, vendor units spent this process, and
   `usage_today` from the spend ledger.
 - `GET /docs` — OpenAPI UI.
-- `POST` / `GET` / `DELETE /secrets/eodhd` — store, inspect (masked) and remove the vendor key in
+- `POST` / `GET /secrets/eodhd` — store and inspect (masked) the vendor key in
   this account's keyring. See "Storing the vendor key at runtime" below.
 - `POST /admin/shutdown` — stop this process from inside it, which is what a wedged service needs;
   nothing in an interactive shell can terminate a session-0 process.
 - `POST /refresh`, `POST /schedule/run` — the on-demand bulk pull and a manual collection run.
 
-When `MDS_ADMIN_TOKEN` is configured, `POST`/`DELETE /secrets/eodhd`, `POST /refresh` and
+When `MDS_ADMIN_TOKEN` is configured, `POST /secrets/eodhd`, `POST /refresh` and
 `POST /schedule/run` require `X-Admin-Token`.
 
 ---
 
-## Providers: three sources, routed per asset class
+## Providers: three sources, ordered per asset class
 
 ```
                     ┌── EODHD    (metered, adjusted, whole-market feeds)
@@ -248,13 +252,15 @@ POST /bars
 GET /price/{symbol}
 ```
 
-The order is per asset class, not one global list:
+The router's order is per asset class, not one global list. The HTTP and MCP surfaces no longer
+take an asset class — the vendor taxonomy behind it was not reliable — so every request is
+priced as `shares` and takes the EODHD → Yahoo order:
 
-| `asset_class` | order | why |
+| Internal asset class | order | why |
 |---|---|---|
-| `shares` (default) | EODHD → Yahoo | EODHD is adjusted and consistent; Yahoo is the free fallback |
+| `shares` (every HTTP request) | EODHD → Yahoo | EODHD is adjusted and consistent; Yahoo is the free fallback |
 | `indices` / `commodities` / `rates` / `forex` | EODHD → Yahoo | EODHD renders these as `.INDX` / US ETF proxies; Yahoo has real `^IXIC`, `GC=F` |
-| `crypto` | **Binance** → EODHD → Yahoo | the pair is quoted natively rather than rendered as `BTC.CC` |
+| `crypto` (library callers only) | **Binance** → EODHD → Yahoo | the pair is quoted natively rather than rendered as `BTC.CC` |
 
 A provider that cannot serve an asset class is never asked. Every quote and bar carries the
 `provider` that answered — **that field is load-bearing**, not decoration: this estate has
@@ -376,9 +382,9 @@ verbatim with the Python reference — a database prepared for one is prepared f
 
 | Table | Grain | Holds |
 |---|---|---|
-| `SymbolPriceCache` | symbol × venue | latest known price, overwritten in place |
-| `DailySnapshot` | symbol × exchange × session | daily OHLCV, appended once per session per venue |
-| `IndicatorCache` | symbol × exchange | precomputed ATR 14/20/22/26/50 for one venue's series |
+| `SymbolPriceCache` | symbol × exchange | latest known price, overwritten in place |
+| `DailySnapshot` | symbol × exchange × session | daily OHLCV, appended once per session per exchange |
+| `IndicatorCache` | symbol × exchange | precomputed ATR 14/20/22/26/50 for one exchange's series |
 | `Exchanges` | one row per exchange | `Code`, `Timezone`, `Opens`, `Closes` in the exchange's own local time; copied from `McTrader_Live.dbo.Exchanges` by `mmds-tool copy-exchanges` and read by the market clock |
 
 The market clock reads the exchange hours from `dbo.Exchanges`, not from
@@ -399,21 +405,23 @@ table when this is the source in use, and `data/clock.json` when it has fallen b
 Notes that are load-bearing:
 
 - **The bar tables are keyed by exchange as well as symbol.** A bare ticker is not unique —
-  `CBA` is an ASX listing and a US one — and a symbol-only key lets one venue's row overwrite
+  `CBA` is an ASX listing and a US one — and a symbol-only key lets one exchange's row overwrite
   the other's without a word. `DailySnapshot` is `(SymbolCode, Exchange, SnapshotDate)` and
-  `IndicatorCache` is `(SymbolCode, Exchange)`, so every read and write states the venue.
-  `SymbolPriceCache` calls the same code `Venue` because it got there first; both columns hold
-  the vendor's exchange code (`US`, `AU`, ...).
-- **A write always states its venue.** The three columns are `NOT NULL` and carry no default,
+  `IndicatorCache` is `(SymbolCode, Exchange)`, so every read and write states the exchange.
+  `SymbolPriceCache` carries the same column as `Exchange`; on a database created before this
+  change it was called `Venue`, and `sql/001_schema.sql` renames it in place (rows and key
+  preserved) the first time the service starts.
+- **A write always states its exchange.** The three columns are `NOT NULL` and carry no default,
   at either layer: the store raises before it builds a row, and SQL Server refuses one that
-  arrives without a value. A row is never filed as US by omission. The only place US is
-  assumed is a request that does not name a venue, which is the API's documented default.
+  arrives without a value. A row is never filed as US by omission. No API request can reach the
+  resolver's US fallback: `country_code` is required, so only an internal caller that states no
+  market at all gets it.
 - **Rows written before 2026-11-01 were backfilled** from the price cache: US, unless that
   symbol was known on the ASX and nowhere else. That reassigned 18,363 rows that had been AU
   all along and were indistinguishable from US ones.
-- **The ATR cache was cleared once**, when the venue key was added: every row in it had been
-  computed under a symbol-only key, so it was either labelled with the wrong venue or had both
-  venues' bars mixed into one number. It refills from the next daily refresh, or from `/atr`
+- **The ATR cache was cleared once**, when the exchange key was added: every row in it had been
+  computed under a symbol-only key, so it was either labelled with the wrong exchange or had both
+  exchanges' bars mixed into one number. It refills from the next daily refresh, or from `/atr`
   on demand.
 - **`IndicatorCache` carries 22 and 26 as well as the specified 14/20/50.** 22 is McTrader's
   Chandelier window and its preferred stop ATR; 26 is PortfolioAdvisor's MACD-V divisor. 20
@@ -443,7 +451,7 @@ Notes that are load-bearing:
 
 Three indexes carry the reads: `PK_DailySnapshot` (SymbolCode, Exchange, SnapshotDate) for one
 symbol's series, `PK_IndicatorCache` (SymbolCode, Exchange) and `PK_SymbolPriceCache`
-(SymbolCode, Venue). The one gap was the *session-wide* read — every symbol's bar for one date,
+(SymbolCode, Exchange). The one gap was the *session-wide* read — every symbol's bar for one date,
 which is what movers and the close-to-close comparisons do. `sql/002_indexes.sql` replaces
 `IX_DailySnapshot_Date` with `IX_DailySnapshot_Session (SnapshotDate, Exchange) INCLUDE (Open,
 High, Low, Close, Volume, IsAdjusted)`. Measured before that change: 11,986 scans of the date
@@ -528,7 +536,7 @@ and a call that vanished would be the accounting hole these tables exist to clos
 Every data endpoint attributes its spend to the `X-MarketData-Caller` header, falling back to the path:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8003/price/AAPL -Headers @{ 'X-MarketData-Caller' = 'minictrader' }
+Invoke-RestMethod 'http://127.0.0.1:8003/price/AAPL?country_code=US' -Headers @{ 'X-MarketData-Caller' = 'minictrader' }
 ```
 
 ```
@@ -630,9 +638,9 @@ spend 100 units writing the same rows.
 
 ### It reports whether it produced the right session
 
-`expected_session` comes from the session rules — the venue's own clock, close plus a
+`expected_session` comes from the session rules — the exchange's own clock, close plus a
 three-hour settlement margin. `behind_expected` is true when the vendor returned an older session than
-the venue says should exist, which is how a vendor lag or a holiday becomes visible instead of silent.
+the exchange says should exist, which is how a vendor lag or a holiday becomes visible instead of silent.
 For scale: at 20:30 Sydney the answer is `US: 2026-10-28`, `AU: 2026-10-29` — the ASX has settled and
 the US has not.
 
@@ -761,7 +769,7 @@ All by environment variable; defaults are the safe ones.
 | `MDS_PORT` | `8003` | port |
 | `MDS_HOST` | `127.0.0.1` | bind address — localhost only |
 | `MDS_CLOCK_USER_TIMEZONE` | `Australia/Sydney` | timezone for a bare `HH:MM` clock reference |
-| `MDS_SCHEDULE_OFFSET_MINUTES` | `45` | collect at venue open + this many minutes |
+| `MDS_SCHEDULE_OFFSET_MINUTES` | `45` | collect at exchange open + this many minutes |
 | `MDS_SCHEDULE_RETRY_MINUTES` | `15` | one retry at +15 min, then stop |
 | `MDS_SCHEDULE_ENABLED` | `1` | `0` stops automatic collection |
 | `MDS_ADMIN_TOKEN` | *(unset)* | when set, required by privileged endpoints |
@@ -773,6 +781,18 @@ All by environment variable; defaults are the safe ones.
 | `MDS_MCP_BASE_URL` | `http://127.0.0.1:8003` | REST service the MCP proxy calls |
 | `MDS_MCP_TIMEOUT` | `90` | MCP proxy request timeout, seconds |
 | `MDS_EXCHANGE_SOURCE` | `McTrader_Live` | source database for `mmds-tool copy-exchanges` |
+
+### SQL Server connectivity (Rust-specific)
+
+`MDS_DB_SERVER` accepts the same three forms as the ODBC `SERVER=` keyword: `host`,
+`host\instance` and `host,port`. **TDS reaches SQL Server over TCP only.** The Python service
+used pyodbc, which silently falls back to shared memory on the database host; the Rust service
+cannot. Before cutover, the instance's TCP/IP protocol must be enabled (SQL Server Configuration
+Manager → Protocols for MSSQLSERVER → TCP/IP), the service restarted, and the port recorded in
+`MDS_DB_SERVER` if it is not 1433. On this host the protocol is currently **disabled**: the only
+TCP listener is the Dedicated Administrator Connection on 1434, which accepts a single session.
+The integration suite reaches the engine through it with `MDS_TEST_SERVER=localhost,1434`; the
+two-session lock-wait test needs `MDS_TEST_CONCURRENCY=1` and a TCP-enabled instance.
 
 Parsing rules, reproduced exactly from the reference:
 
@@ -804,8 +824,7 @@ declaring the port complete.
 - `rustup` with the stable MSVC toolchain, and Visual Studio 2022 Build Tools with the
   "Desktop development with C++" workload (for `link.exe`).
 - SQL Server reachable with the `Market_Data` database; Windows integrated authentication by default.
-- No Python and no ODBC Driver 17 are required by the Rust service — it speaks TDS directly. The
-  ODBC driver is still needed if you keep the Python service running during parity.
+- No Python and no ODBC Driver 17 are required by the Rust service — it speaks TDS directly.
 - An EODHD key is optional. Without one, Yahoo and Binance still answer; see "No key does not stop
   the service" below.
 
@@ -822,9 +841,8 @@ The binaries land in `target\release\`:
 |---|---|
 | `mmds-service.exe` | the long-running HTTP service, supervised by NSSM |
 | `mmds-daily.exe` | bulk pull, free seed, raw-close fill, indicator rebuild |
-| `mmds-clock.exe` | print the resolved market clock and session for diagnosis |
 | `mmds-mcp.exe` | MCP proxy over stdio or streamable-http |
-| `mmds-tool.exe` | operator subcommands: apply-schema, copy-exchanges, probes, smoke tests |
+| `mmds-tool.exe` | operator subcommands: apply-schema, copy-exchanges, probes, smoke tests, check-mcp |
 
 Commands below name the binaries directly. Add `target\release` to `PATH`, prefix with
 `.\target\release\`, or use the `run.ps1` wrappers.
@@ -856,7 +874,7 @@ cargo run --release --bin mmds-service
 lock, scheduler state and process counters; a second instance would mean two caches and two
 100-unit bulk pulls for one market. Scale out only after the snapshot moves to a shared store.
 
-### Tests and parity
+### Tests
 
 ```powershell
 cargo fmt --check
@@ -868,12 +886,6 @@ cargo build --release
 The unit and HTTP contract tests use injected providers and a fake store; no test reads the real
 EODHD key or spends vendor units. SQL integration tests are `#[ignore]`d unless
 `MDS_TEST_DATABASE` names a disposable database.
-
-`scripts/parity.ps1` runs the Python service on 8003 and the Rust service on 8013 against the same
-database and compares the stable endpoints — `/bars` with `allow_fetch=false`, cache-only `/atr`,
-the clock/session/exchange endpoints and the availability endpoints — after normalising timestamps
-and ages. `/prices` is compared for shape and venue, not live values. Do not use `force=true` on
-`/refresh` during verification without approving the 100-unit spend; use the `already-fresh` path.
 
 ---
 
@@ -952,20 +964,20 @@ wedged child that will not serve HTTP — after which NSSM's restart is usually 
 
 ### Collection is a schedule inside the service, not a task
 
-The service collects on its own clock: at each venue's **open + 45 minutes**, with **one retry
+The service collects on its own clock: at each exchange's **open + 45 minutes**, with **one retry
 fifteen minutes later** and nothing after that.
 
-| market | venue opens | fires at | UTC |
+| market | exchange opens | fires at | UTC |
 |---|---|---|---|
 | US | 09:30 New York | 10:15 New York | 14:15Z on EDT, 15:15Z on EST |
 | AU | 10:00 Sydney | 10:45 Sydney | 23:45Z the previous UTC day |
 
 Both times come from the market clock, so a daylight-saving change moves the collection with the
 session. The guard is at the point of collection, not only on the timer: nothing is written outside
-the venue's session, including from a manual run — a price collected at 02:00 on a Sunday is a stale
+the exchange's session, including from a manual run — a price collected at 02:00 on a Sunday is a stale
 echo or a synthetic print, and either is what a screener should not be ranking on.
 
-What a run collects depends on the venue. The US gets the whole-market snapshot (one call, 100
+What a run collects depends on the exchange. The US gets the whole-market snapshot (one call, 100
 units). The ASX has no whole-market real-time feed, so its run is the settled daily bulk **plus**
 live prices for the top 100 listings by dollar volume on the last settled session
 (`MDS_SCHEDULE_PRICE_UNIVERSE`, one unit a symbol). That second part is what writes an observation
@@ -979,7 +991,7 @@ Invoke-RestMethod -Method Post 'http://127.0.0.1:8003/schedule/run?market=AU'   
 ```
 
 `GET /schedule` reports `done`, `waiting` or **`manual-intervention`** — the last means two attempts
-failed and the service has stopped trying, by design. A manual run still refuses outside the venue's
+failed and the service has stopped trying, by design. A manual run still refuses outside the exchange's
 session with `409 closed`, and does not consume the retry.
 
 The external `McTrader_Market_Data_Service_Daily` task (11:30 local) was **retired on 2026-11-01**: it
@@ -1033,9 +1045,12 @@ Invoke-RestMethod -Method Post http://127.0.0.1:8003/secrets/eodhd `
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/secrets/eodhd` | store the key, and rebuild the vendor client so it takes effect at once |
+| `POST` | `/secrets/eodhd` | store the key (409 when one is already configured), and rebuild the vendor client so it takes effect at once |
 | `GET` | `/secrets/eodhd` | whether a key is stored, a **masked** form, and which source is in use |
-| `DELETE` | `/secrets/eodhd` | remove the key; the service keeps running |
+
+Once a key is set it is neither replaced nor removed over HTTP: `POST` answers 409 and there is
+no `DELETE`. Rotate it by editing the account's `market_data:eodhd:global` / `eodhd:api_key`
+entry in Windows Credential Manager.
 
 **The key is never returned.** `GET` gives `masked` (last four characters), `length`, the keyring
 target and `backend` — enough to confirm *which* key is stored, useless to anyone intercepting it:
@@ -1052,20 +1067,19 @@ implementation reported `WinVaultKeyring`, and the Rust store reports its own na
 
 #### No key does not stop the service
 
-EODHD is left out of the router and Yahoo/Binance carry on, so crypto, indices and FX keep answering.
+EODHD is left out of the router and Yahoo carries on, so share prices keep answering.
 A share falls through to Yahoo — and the response says `provider: "yahoo"`, so the tape change is
 declared rather than hidden. Verified with the key removed:
 
 | Call | With no key |
 |---|---|
-| `/price/BTC-USD?asset_class=crypto` | `provider=binance` |
-| `/price/IXIC?asset_class=indices` | `provider=yahoo` |
-| `/price/AAPL` | `provider=yahoo` — degraded, and declared |
+| `/price/AAPL?country_code=US` | `provider=yahoo` — degraded, and declared |
+| `/price/CBA?country_code=AU` | `provider=yahoo` |
 | `/prices` above 100 symbols | per-symbol, because the bulk feed is EODHD-only |
 
 #### Protecting the write
 
-`POST` / `DELETE /secrets/eodhd`, `POST /refresh` and `POST /schedule/run` are privileged: a local
+`POST /secrets/eodhd`, `POST /refresh` and `POST /schedule/run` are privileged: a local
 process that can overwrite the key can point this service at an attacker's key, and once the service
 runs as LocalSystem it can make SYSTEM store a key the user could not write themselves.
 
@@ -1142,9 +1156,16 @@ Run it by hand to check before installing:
 | SQL driver | `MDS_DB_DRIVER` is accepted but unused; tiberius speaks TDS directly, so ODBC Driver 17 is not needed |
 | SQL authentication | `MDS_DB_TRUSTED=0` now works, using optional `MDS_DB_USER` / `MDS_DB_PASSWORD` |
 | `/secrets/eodhd` `backend` | reports the Rust credential-store backend instead of `WinVaultKeyring`; informational |
+| `/secrets/eodhd` surface | `DELETE` is removed, and `POST` is set-once: it answers 409 `key-already-set` when a key is already configured, so the key can only be set over HTTP when none exists |
+| `country_code` requirement | required on `/price`, `/prices`, `/atr`, `/bars`, `/todays-data-is-available` and `/todays-big-movers`; missing or unknown is a 422, where the Python service defaulted a bare symbol to US |
+| `venue` renamed to `exchange` | the request field, every response field, the `mixed-venues` error code (now `mixed-exchanges`) and the `SymbolPriceCache` column are all `exchange`. There is no `venue` compatibility path: this API's field is `exchange` only. Existing databases are renamed in place at startup |
 | OpenAPI document | generated by utoipa; paths, methods and fields match, but descriptions and ordering may differ from FastAPI's |
 | JSON numbers | parsed values match; textual formatting of floats may differ |
-| Request-validation errors | FastAPI-shaped where practical, not guaranteed byte-identical |
+| Request validation (body) | DTO refusals (`/bars`, `/prices`, `/atr`) are 422 with FastAPI's `{"detail":[...]}` shape; the `msg` text is not pydantic's |
+| Request validation (extractors) | malformed JSON or a mistyped query value is refused by axum with 400 and a plain-text body before any handler; FastAPI answered 422 JSON |
+| `session_date` | typed as a date; an unparseable value is a 422 here, while Python accepted the string and failed later |
+| `/schedule/run` failure | a vendor failure is caught and answered 409 `{"ok":false,"status":"error",...}`; Python let it escape as 500 |
+| `/docs` | redirects 303 to `/docs/` (Swagger UI); FastAPI served 200 at `/docs` |
 | Process model | still exactly one service instance; the snapshot, refresh lock, scheduler and counters are process-local |
 
 At cutover, stop and remove the Python service. Do not run both against port 8003, and do not let

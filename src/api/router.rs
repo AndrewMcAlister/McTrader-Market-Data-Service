@@ -17,7 +17,7 @@ use tower_http::trace::TraceLayer;
 use utoipa_swagger_ui::SwaggerUi;
 
 use super::state::AppState;
-use super::{data, market, openapi, ops, refresh, secrets, todays};
+use super::{data, market, openapi, ops, refresh, screener, secrets, todays};
 
 /// Build the complete HTTP surface around one shared state.
 pub fn build_router(state: AppState) -> Router {
@@ -49,6 +49,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/prices", post(data::post_prices))
         .route("/atr", post(data::post_atr))
         .route("/bars", post(data::post_bars))
+        .route("/bars/intraday", post(data::post_intraday))
+        .route("/bars/bulk", post(data::post_bulk))
+        // -- vendor queries ---------------------------------------------------
+        .route("/screener", post(screener::post_screener))
+        .route("/profile", post(screener::post_profile))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .layer(TraceLayer::new_for_http())

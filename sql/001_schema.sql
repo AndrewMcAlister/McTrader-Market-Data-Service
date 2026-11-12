@@ -8,7 +8,8 @@
  * database MDS_DATABASE points at, so the rename is a connection-string change and not a
  * migration. See README §"The Back_Test -> Market_Data rename".
  *
- * Three tables, as specified: SymbolPriceCache, DailySnapshot, IndicatorCache.
+ * Three tables, as specified: SymbolPriceCache, DailySnapshot, IndicatorCache. Two more arrived
+ * with the EODHD egress routes (2026-11-12): IntradayBar5Min and BulkSnapshotPull.
  *
  * Idempotent: safe to re-run. Everything uses CREATE ... IF NOT EXISTS style
  * guards because the daily job calls ensure_schema() on every start.
@@ -485,4 +486,146 @@ IF OBJECT_ID('dbo.RequestTypes', 'U') IS NOT NULL
                  N''Carried from the same endpoint measured flat at 100 across US 50,234, LSE 7,082 and AS 527 rows; an AU pull itself was not in that run.'',
                  N''Separate from /eod-bulk-last-day/US so EODHDUsage names the market that was pulled and refresh.is_fresh(AU) reads the AU row rather than the US one.'',
                  1);';
+GO
+
+/* ------------------------------------------------------------------ */
+/* 7. IntradayBar5Min — the owned 5-minute tape (2026-11-12)           */
+/* ------------------------------------------------------------------ */
+/* The vendor's native intraday interval is 5m. Every larger timeframe the intraday endpoint
+   serves is derived on read, so this table holds one row per 5m bar and nothing derived:
+   storing the 4H buckets beside their own inputs would let the two disagree after a re-pull.
+
+   Owned rather than read from dbo.Bar5Min. The estate tape is unadjusted, US-only, its newest
+   row is 2026-10-30, and its provenance per symbol is not knowable from the table -- serving it
+   would make a days-old bar indistinguishable from a fresh one. A table written only by the
+   endpoint has one writer, one meaning and one TTL.
+
+   Adjusted is stored, not assumed, so a future adjusted source cannot silently mix scales
+   inside one series. The table is pruned by MDS_INTRADAY_RETENTION_DAYS (default 30): at
+   200 symbols x 78 bars x 60 sessions it is ~936,000 rows, which must not grow unbounded. */
+
+IF OBJECT_ID('dbo.IntradayBar5Min', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.IntradayBar5Min (
+        Exchange    varchar(8)    NOT NULL,
+        SymbolCode  varchar(24)   NOT NULL,
+        TsUtc       datetime2(0)  NOT NULL,
+        [Open]      decimal(18,6) NOT NULL,
+        [High]      decimal(18,6) NOT NULL,
+        [Low]       decimal(18,6) NOT NULL,
+        [Close]     decimal(18,6) NOT NULL,
+        Volume      bigint        NOT NULL CONSTRAINT DF_IntradayBar5Min_Volume DEFAULT (0),
+        Adjusted    bit           NOT NULL CONSTRAINT DF_IntradayBar5Min_Adjusted DEFAULT (0),
+        FetchedUtc  datetime2     NOT NULL CONSTRAINT DF_IntradayBar5Min_FetchedUtc DEFAULT (SYSUTCDATETIME()),
+        CONSTRAINT PK_IntradayBar5Min PRIMARY KEY CLUSTERED (Exchange, SymbolCode, TsUtc)
+    );
+
+    CREATE NONCLUSTERED INDEX IX_IntradayBar5Min_Symbol
+        ON dbo.IntradayBar5Min (SymbolCode, Exchange, TsUtc DESC);
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.TableDoc WHERE TableName = 'IntradayBar5Min')
+    INSERT INTO dbo.TableDoc (TableName, Grain, Purpose, RowCountNote, DataSource)
+    VALUES ('IntradayBar5Min',
+            'one row per symbol per exchange per 5-minute bar',
+            'The owned 5-MINUTE INTRADAY TAPE, written by D:\McTrader_Market_Data_Service from EODHD /intraday?interval=5m. Native 5m rows only: 15m, 30m, 1h and 4h bars are derived on read from this series, never stored, so a derived bar can never disagree with the bars it came from. NOT split-adjusted: the vendor intraday tape is unadjusted, which is why Adjusted is stored rather than assumed. Deliberately separate from dbo.Bar5Min, which is the estate tape (unadjusted, US-only, last written 2026-10-30).',
+            '~200 symbols x 78 bars x 60 sessions; pruned to MDS_INTRADAY_RETENTION_DAYS (default 30)',
+            'measured');
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.ColumnDoc WHERE TableName = 'IntradayBar5Min' AND ColumnName = 'TsUtc')
+    INSERT INTO dbo.ColumnDoc (TableName, ColumnName, DataType, Unit, Meaning, Notes)
+    VALUES ('IntradayBar5Min', 'TsUtc', 'datetime2(0)', 'UTC instant',
+            'The 5-minute bar''s opening instant.',
+            'Part of the clustered key. A bucket keeps its first bar''s instant, so a 4H bar is dated by the bar that opened it, in exchange-local time at the API. Stored as naive UTC; the endpoint converts to the exchange zone for the response''s `d`.');
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.ColumnDoc WHERE TableName = 'IntradayBar5Min' AND ColumnName = 'Adjusted')
+    INSERT INTO dbo.ColumnDoc (TableName, ColumnName, DataType, Unit, Meaning, Notes)
+    VALUES ('IntradayBar5Min', 'Adjusted', 'bit', 'flag',
+            '0 = the close is the traded price; 1 = split-adjusted.',
+            'EODHD''s intraday tape is unadjusted, so every row this service writes is 0 and the API reports adjusted:false for the whole series. Never mix 0 and 1 rows in one series: a split reads as a catastrophic move.');
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.ColumnDoc WHERE TableName = 'IntradayBar5Min' AND ColumnName = 'FetchedUtc')
+    INSERT INTO dbo.ColumnDoc (TableName, ColumnName, DataType, Unit, Meaning, Notes)
+    VALUES ('IntradayBar5Min', 'FetchedUtc', 'datetime2', 'UTC instant',
+            'When this service fetched the bar from the vendor.',
+            'The freshness the intraday endpoint''s TTL (MDS_INTRADAY_TTL_SECONDS, default 300) reads. A re-fetch of the same bar updates it in place; TsUtc is the bar''s own time and does not move.');
+GO
+
+/* ------------------------------------------------------------------ */
+/* 8. BulkSnapshotPull — the completeness marker (2026-11-12)          */
+/* ------------------------------------------------------------------ */
+/* A row in DailySnapshot says "this symbol traded that day". It does not say "this market was
+   fully pulled that day", and the difference is load-bearing: the latest session can hold 1,881
+   rows against the ~27,714 codes a completed pull writes, and a partial set silently changes
+   every derived return that reads it. This table is the completeness fact, written after a pull
+   returns and only when the pull is whole.
+
+   Deliberately separate from DailySnapshot rather than a flag on it: the fact is per market and
+   per session, not per symbol.
+
+   The column is Market, not Exchange, because the bulk pull is keyed by the vendor's market
+   parameter and the endpoint's response uses the same word. */
+
+IF OBJECT_ID('dbo.BulkSnapshotPull', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.BulkSnapshotPull (
+        Market       varchar(8)  NOT NULL,
+        SessionDate  date        NOT NULL,
+        RowCount     int         NOT NULL,
+        Provider     varchar(16) NOT NULL,
+        CompletedUtc datetime2   NOT NULL CONSTRAINT DF_BulkSnapshotPull_CompletedUtc DEFAULT (SYSUTCDATETIME()),
+        CONSTRAINT PK_BulkSnapshotPull PRIMARY KEY CLUSTERED (Market, SessionDate)
+    );
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.TableDoc WHERE TableName = 'BulkSnapshotPull')
+    INSERT INTO dbo.TableDoc (TableName, Grain, Purpose, RowCountNote, DataSource)
+    VALUES ('BulkSnapshotPull',
+            'one row per market per completed session pull',
+            'THE COMPLETENESS MARKER for a whole-market daily pull, written by D:\McTrader_Market_Data_Service POST /bars/bulk. A row says the market''s whole session was pulled, which is a different claim from a DailySnapshot row (that one only says a symbol traded). POST /bars/bulk serves a cached session only when this table records the pull as complete; a pull materially below the previous completed session''s row count is upserted but unmarked, and its key is returned in the response''s partial list. A crash between the upsert and this marker leaves the session unmarked, which is the safe direction: a refetch, not a wrong answer.',
+            'one row per market per session pulled on demand',
+            'measured');
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.ColumnDoc WHERE TableName = 'BulkSnapshotPull' AND ColumnName = 'RowCount')
+    INSERT INTO dbo.ColumnDoc (TableName, ColumnName, DataType, Unit, Meaning, Notes)
+    VALUES ('BulkSnapshotPull', 'RowCount', 'int', 'rows',
+            'How many codes the completed pull wrote for this market and session.',
+            'The baseline the next pull''s completeness check compares against. A pull whose count is far below it is a partial write, not a quiet market. The live gap that justifies this column: 1,881 rows in DailySnapshot against ~27,714 in a completed pull.');
+GO
+
+IF NOT EXISTS (SELECT 1 FROM dbo.ColumnDoc WHERE TableName = 'BulkSnapshotPull' AND ColumnName = 'Market')
+    INSERT INTO dbo.ColumnDoc (TableName, ColumnName, DataType, Unit, Meaning, Notes)
+    VALUES ('BulkSnapshotPull', 'Market', 'varchar(8)', 'market code',
+            'The vendor market parameter that was pulled: US or AU.',
+            'Called Market rather than Exchange because that is the parameter /eod-bulk-last-day takes and the word POST /bars/bulk answers with. Part of the clustered key: one completeness fact per market per session.');
+GO
+
+/* The screener's tariff row.
+
+   POST /screener and each uncached POST /profile symbol bill 5 flat. The figure is measured:
+   README.md records a live ledger row of 108 screener calls costing 540 units, and the usage
+   fixture already prices the row (src/usage.rs). Is_Estimated is 0 for that reason.
+
+   Guarded like the AU bulk block: an existing row is left alone, because dbo.RequestTypes is
+   the authority and a re-measured price is a row update, not a release. The INSERT is dynamic
+   for the same reason as that block -- naming the table in the batch would fail on a database
+   that does not have it, where the service still runs and records the call at cost 0. */
+
+IF OBJECT_ID('dbo.RequestTypes', 'U') IS NOT NULL
+    EXEC sp_executesql N'
+        IF NOT EXISTS (SELECT 1 FROM dbo.RequestTypes WHERE RequestType = N''/screener'')
+            INSERT INTO dbo.RequestTypes
+                (RequestType, Endpoint, CostBasis, CostEach, MeasuredAt, Evidence, Note, Is_Estimated)
+            VALUES
+                (N''/screener'', N''/screener'', N''flat'', 5,
+                 ''2026-11-12'',
+                 N''Measured: the estate ledger shows 108 screener calls costing 540 units (5 each), and the /profile fan-out is one pinned screener call per uncached symbol.'',
+                 N''Flat 5 per call, whatever the row count and whatever the limit. POST /screener bills once per request; POST /profile bills once per uncached symbol.''',
+                 0);';
 GO

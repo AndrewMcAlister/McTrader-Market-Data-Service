@@ -22,8 +22,9 @@ use crate::collector::CollectionProducts;
 use crate::config::{NoKeyring, Settings};
 use crate::error::MarketDataError;
 use crate::products::{
-    AtrBatchResponse, AtrRequest, BarsResponse, BulkSnapshotStats, PricesResponse, ProductError,
-    QuotePayload, StatsResponse,
+    AtrBatchResponse, AtrRequest, BarsResponse, BulkDateKey, BulkResponse, BulkSnapshotStats,
+    IntradayRequest, IntradayResponse, PricesResponse, ProductError, ProfileBatch, ProfilesResponse,
+    QuotePayload, ScreenerResponse, StatsResponse,
 };
 use crate::schedule::{MarketRun, MarketRunner, RefreshScheduler, SessionSchedule, MARKETS};
 use crate::secrets::{CredentialBackend, EodhdKeyStore, KeyringFailure};
@@ -267,7 +268,7 @@ impl ProductLayer for FakeProducts {
 
     async fn atr_batch(&self, request: AtrRequest<'_>) -> Result<AtrBatchResponse, ProductError> {
         self.record(format!(
-            "atr:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{}",
+            "atr:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{}:{:?}:{:?}",
             request.symbols,
             request.period,
             request.method,
@@ -277,6 +278,8 @@ impl ProductLayer for FakeProducts {
             request.multiplier,
             request.direction,
             request.allow_fetch,
+            request.asset_class,
+            request.country_code,
         ));
         if let Some(error) = self.take_failure() {
             return Err(error);
@@ -293,6 +296,101 @@ impl ProductLayer for FakeProducts {
 
     async fn stats(&self) -> StatsResponse {
         stats()
+    }
+
+    async fn screener(
+        &self,
+        country_code: &str,
+        exchange: Option<&str>,
+        filters: &[serde_json::Value],
+        sort: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<ScreenerResponse, ProductError> {
+        self.record(format!(
+            "screener:{country_code}:{exchange:?}:{}:{sort:?}:{limit}:{offset}",
+            serde_json::to_string(filters).unwrap_or_default()
+        ));
+        if let Some(error) = self.take_failure() {
+            return Err(error);
+        }
+        Ok(ScreenerResponse {
+            provider: "eodhd".to_string(),
+            country_code: country_code.to_string(),
+            exchange: exchange.unwrap_or("US").to_string(),
+            filters: filters.to_vec(),
+            sort: sort.map(str::to_string),
+            limit,
+            offset,
+            count: 0,
+            rows: Vec::new(),
+        })
+    }
+
+    async fn profiles(&self, request: ProfileBatch<'_>) -> Result<ProfilesResponse, ProductError> {
+        self.record(format!(
+            "profiles:{:?}:{:?}:{:?}",
+            request.symbols, request.exchange, request.country_code
+        ));
+        if let Some(error) = self.take_failure() {
+            return Err(error);
+        }
+        Ok(ProfilesResponse {
+            provider: "eodhd".to_string(),
+            country_code: request.country_code.unwrap_or_default().to_string(),
+            exchange: request.exchange.unwrap_or("US").to_string(),
+            requested: request.symbols.len(),
+            complete: true,
+            missing: Vec::new(),
+            profiles: BTreeMap::new(),
+        })
+    }
+
+    async fn intraday(&self, request: IntradayRequest<'_>) -> Result<IntradayResponse, ProductError> {
+        self.record(format!(
+            "intraday:{:?}:{}:{}:{}:{:?}:{:?}",
+            request.symbols,
+            request.timeframe,
+            request.limit,
+            request.allow_fetch,
+            request.exchange,
+            request.country_code
+        ));
+        if let Some(error) = self.take_failure() {
+            return Err(error);
+        }
+        Ok(IntradayResponse {
+            exchange: request.exchange.unwrap_or("US").to_string(),
+            provider: "cache".to_string(),
+            fetched: Vec::new(),
+            short_history: Vec::new(),
+            bars: BTreeMap::new(),
+        })
+    }
+
+    async fn bulk_closes(
+        &self,
+        market: &str,
+        dates: &[BulkDateKey],
+        allow_fetch: bool,
+    ) -> Result<BulkResponse, ProductError> {
+        self.record(format!(
+            "bulk:{market}:{}:{allow_fetch}",
+            dates
+                .iter()
+                .map(|key| key.as_requested())
+                .collect::<Vec<_>>()
+                .join("|")
+        ));
+        if let Some(error) = self.take_failure() {
+            return Err(error);
+        }
+        Ok(BulkResponse {
+            market: market.to_string(),
+            provider: "cache".to_string(),
+            partial: Vec::new(),
+            dates: BTreeMap::new(),
+        })
     }
 }
 
@@ -625,6 +723,352 @@ async fn the_get_price_query_reaches_the_product_layer() {
         products.calls(),
         vec!["price:tsla:Some(\"US\"):Some(60.0):None:Some(\"US\")"]
     );
+}
+
+// ---------------------------------------------------------------------------
+// asset_class on the four existing routes
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_absent_asset_class_is_still_shares_and_changes_nothing() {
+    let products = FakeProducts::ok();
+    let state = state(Some(products.clone()));
+    for request in [
+        get("/price/TSLA?country_code=US"),
+        post_json("/prices", json!({"symbols": ["TSLA"], "country_code": "US"})),
+        post_json("/atr", json!({"symbols": ["TSLA"], "country_code": "US"})),
+        post_json("/bars", json!({"symbols": ["TSLA"], "country_code": "US"})),
+    ] {
+        let reply = call(&state, request).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+    for call in products.calls() {
+        assert!(call.contains(":None:"), "an absent class must stay None: {call}");
+    }
+}
+
+#[tokio::test]
+async fn a_stated_asset_class_reaches_the_product_layer_canonically() {
+    let products = FakeProducts::ok();
+    let state = state(Some(products.clone()));
+    let requests = [
+        get("/price/IXIC?country_code=US&asset_class=indices"),
+        post_json(
+            "/prices",
+            json!({"symbols": ["GLD"], "country_code": "US", "asset_class": "commodities"}),
+        ),
+        post_json(
+            "/atr",
+            json!({"symbols": ["US10Y"], "country_code": "US", "asset_class": "RATES"}),
+        ),
+        post_json(
+            "/bars",
+            json!({"symbols": ["GSPC"], "country_code": "US", "asset_class": "index"}),
+        ),
+    ];
+    for request in requests {
+        let reply = call(&state, request).await;
+        assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    }
+    let calls = products.calls();
+    assert!(calls[0].contains("Some(\"indices\")"), "{calls:?}");
+    assert!(calls[1].contains("Some(\"commodities\")"), "{calls:?}");
+    // An alias is forwarded as the canonical spelling, so the product layer sees one vocabulary.
+    assert!(calls[2].contains("Some(\"rates\")"), "{calls:?}");
+    assert!(calls[3].contains("Some(\"indices\")"), "{calls:?}");
+}
+
+#[tokio::test]
+async fn an_unknown_asset_class_is_a_422_naming_the_vocabulary_on_every_route() {
+    let products = FakeProducts::ok();
+    let state = state(Some(products.clone()));
+    let requests = [
+        (get("/price/TSLA?country_code=US&asset_class=warrants"), "query"),
+        (
+            post_json(
+                "/prices",
+                json!({"symbols": ["TSLA"], "country_code": "US", "asset_class": "warrants"}),
+            ),
+            "body",
+        ),
+        (
+            post_json(
+                "/atr",
+                json!({"symbols": ["TSLA"], "country_code": "US", "asset_class": "warrants"}),
+            ),
+            "body",
+        ),
+        (
+            post_json(
+                "/bars",
+                json!({"symbols": ["TSLA"], "country_code": "US", "asset_class": "warrants"}),
+            ),
+            "body",
+        ),
+    ];
+    for (request, _) in requests {
+        let reply = call(&state, request).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reply.body["error"], "unknown-asset-class");
+        let detail = reply.body["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("indices"), "{detail}");
+        assert!(detail.contains("warrants"), "{detail}");
+    }
+    assert!(products.calls().is_empty(), "{:?}", products.calls());
+}
+
+// ---------------------------------------------------------------------------
+// the screener and the profile
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_screen_without_a_country_is_refused_before_the_product_layer() {
+    let products = FakeProducts::ok();
+    let reply = call(
+        &state(Some(products.clone())),
+        post_json("/screener", json!({"filters": [["adjusted_close", ">", 1]]})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        reply.body["detail"][0]["loc"],
+        json!(["body", "country_code"])
+    );
+    assert_eq!(reply.body["detail"][0]["type"], "missing");
+    assert!(products.calls().is_empty());
+}
+
+#[tokio::test]
+async fn the_screener_defaults_and_the_query_reach_the_product_layer() {
+    let products = FakeProducts::ok();
+    let reply = call(
+        &state(Some(products.clone())),
+        post_json(
+            "/screener",
+            json!({
+                "country_code": "us",
+                "exchange": "NASDAQ",
+                "filters": [["market_capitalization", ">", 300000000]],
+                "sort": "refund_5d_p.desc"
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let expected = format!(
+        "screener:US:Some(\"NASDAQ\"):{}:Some(\"refund_5d_p.desc\"):100:0",
+        json!([["market_capitalization", ">", 300000000]])
+    );
+    assert_eq!(products.calls(), vec![expected]);
+}
+
+#[tokio::test]
+async fn the_screener_bounds_are_enforced_before_the_product_layer() {
+    let products = FakeProducts::ok();
+    let state = state(Some(products.clone()));
+    let cases = [
+        (json!({"country_code": "US", "limit": 501}), json!(["body", "limit"])),
+        (json!({"country_code": "US", "limit": 0}), json!(["body", "limit"])),
+        (json!({"country_code": "US", "offset": -1}), json!(["body", "offset"])),
+    ];
+    for (body, location) in cases {
+        let reply = call(&state, post_json("/screener", body)).await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reply.body["detail"][0]["loc"], location);
+    }
+    assert!(products.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_vendor_rejection_keeps_the_422_vendor_rejected_shape() {
+    let products = FakeProducts::failing(ProductError::Refused(MarketDataError::new(
+        "vendor-rejected",
+        "Invalid filter field: market_cap",
+        422,
+    )));
+    let reply = call(
+        &state(Some(products)),
+        post_json("/screener", json!({"country_code": "US"})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.body["error"], "vendor-rejected");
+    assert!(reply.body["detail"].as_str().unwrap().contains("market_cap"));
+}
+
+#[tokio::test]
+async fn a_missing_product_layer_is_a_503_for_both_vendor_routes() {
+    let state = state(None);
+    for (path, body) in [
+        ("/screener", json!({"country_code": "US"})),
+        ("/profile", json!({"symbols": ["WDS"], "country_code": "AU"})),
+        (
+            "/bars/intraday",
+            json!({"symbols": ["TTD"], "timeframe": "5Min", "country_code": "US"}),
+        ),
+        ("/bars/bulk", json!({"dates": ["latest"]})),
+    ] {
+        let reply = call(&state, post_json(path, body)).await;
+        assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        assert_eq!(reply.body, json!({"error": "vendor-unavailable"}), "{path}");
+    }
+}
+
+#[tokio::test]
+async fn the_profile_cap_is_refused_before_the_product_layer() {
+    let products = FakeProducts::ok();
+    let symbols: Vec<String> = (0..26).map(|index| format!("SYM{index}")).collect();
+    let reply = call(
+        &state(Some(products.clone())),
+        post_json(
+            "/profile",
+            json!({"symbols": symbols, "country_code": "US"}),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.body["detail"][0]["loc"], json!(["body", "symbols"]));
+    assert_eq!(reply.body["detail"][0]["type"], "too_long");
+    assert!(products.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_profile_request_reaches_the_product_layer_with_the_country_code() {
+    let products = FakeProducts::ok();
+    let reply = call(
+        &state(Some(products.clone())),
+        post_json(
+            "/profile",
+            json!({"symbols": ["WDS", "BHP"], "country_code": "au", "exchange": "ASX"}),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(
+        products.calls(),
+        vec!["profiles:[\"WDS\", \"BHP\"]:Some(\"ASX\"):Some(\"AU\")"]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// intraday and bulk bars
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_intraday_request_needs_a_timeframe_and_a_country() {
+    let products = FakeProducts::ok();
+    let state = state(Some(products.clone()));
+
+    let reply = call(
+        &state,
+        post_json("/bars/intraday", json!({"symbols": ["TTD"], "country_code": "US"})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        reply.body["detail"][0]["loc"],
+        json!(["body", "timeframe"])
+    );
+
+    let reply = call(
+        &state,
+        post_json(
+            "/bars/intraday",
+            json!({"symbols": ["TTD"], "timeframe": "1Day", "country_code": "US"}),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.body["detail"][0]["type"], "literal_error");
+
+    assert!(products.calls().is_empty());
+}
+
+#[tokio::test]
+async fn an_intraday_request_defaults_to_one_session_and_reaches_the_product_layer() {
+    let products = FakeProducts::ok();
+    let reply = call(
+        &state(Some(products.clone())),
+        post_json(
+            "/bars/intraday",
+            json!({"symbols": ["TTD"], "timeframe": "4h", "country_code": "us"}),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(reply.body["provider"], "cache");
+    assert_eq!(
+        products.calls(),
+        vec!["intraday:[\"TTD\"]:4Hour:78:true:None:Some(\"US\")"]
+    );
+}
+
+#[tokio::test]
+async fn a_bulk_request_needs_a_well_formed_date_and_an_allow_fetch_refusal_is_a_404() {
+    let products = FakeProducts::failing(ProductError::Refused(MarketDataError::new(
+        "not-pulled",
+        "no completed bulk pull for US 2026-11-07; this service will not return a partial \
+         session as if it were whole",
+        404,
+    )));
+    let state = state(Some(products));
+
+    let reply = call(
+        &state,
+        post_json("/bars/bulk", json!({"dates": ["2026-13-40"]})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        reply.body["detail"][0]["loc"],
+        json!(["body", "dates", "0"])
+    );
+    assert_eq!(reply.body["detail"][0]["type"], "invalid-date");
+
+    let reply = call(
+        &state,
+        post_json(
+            "/bars/bulk",
+            json!({"market": "US", "dates": ["2026-11-07"], "allow_fetch": false}),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(reply.body["error"], "not-pulled");
+    assert!(reply.body["detail"]
+        .as_str()
+        .unwrap()
+        .contains("partial session"));
+}
+
+#[tokio::test]
+async fn a_bulk_request_collapses_duplicates_and_defaults_the_market() {
+    let products = FakeProducts::ok();
+    let reply = call(
+        &state(Some(products.clone())),
+        post_json(
+            "/bars/bulk",
+            json!({"dates": ["latest", "latest", "2026-08-13"]}),
+        ),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(reply.body["market"], "US");
+    assert_eq!(products.calls(), vec!["bulk:US:latest|2026-08-13:true"]);
+}
+
+#[tokio::test]
+async fn a_bulk_request_over_ten_distinct_dates_is_refused() {
+    let products = FakeProducts::ok();
+    let dates: Vec<String> = (1..=11).map(|day| format!("2026-08-{day:02}")).collect();
+    let reply = call(
+        &state(Some(products.clone())),
+        post_json("/bars/bulk", json!({"dates": dates})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(reply.body["detail"][0]["type"], "too_long");
+    assert!(products.calls().is_empty());
 }
 
 // ---------------------------------------------------------------------------

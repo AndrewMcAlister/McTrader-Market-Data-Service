@@ -244,6 +244,8 @@ pub fn document() -> Value {
                          "description": "Bare ticker or one with a market suffix, such as CBA.AU."},
                         {"name": "country_code", "in": "query", "required": true, "schema": country_schema()},
                         {"name": "exchange", "in": "query", "required": false, "schema": exchange_schema()},
+                        {"name": "asset_class", "in": "query", "required": false, "schema": asset_class_schema(),
+                         "description": "Optional. Absent means shares. An index, commodity ETF proxy or rate must state its class or it is priced as a share."},
                         {"name": "max_age_seconds", "in": "query", "required": false,
                          "schema": {"type": ["number", "null"], "minimum": 0, "example": 60},
                          "description": "Maximum cache age in seconds. The default is 300; a caller may only ask for something newer, never staler."}
@@ -304,13 +306,102 @@ pub fn document() -> Value {
                         "schema": {"$ref": "#/components/schemas/BarsRequest"},
                         "examples": {
                             "cache_only": {"summary": "Fifteen completed sessions from the cache, never calling a vendor", "value": {"symbols": ["AAPL"], "country_code": "US", "sessions": 15, "allow_fetch": false}},
-                            "asx_history": {"summary": "A year of ASX history, fetching when the cache is short", "value": {"symbols": ["CBA.AU"], "country_code": "AU", "exchange": "ASX", "sessions": 250}}
+                            "asx_history": {"summary": "A year of ASX history, fetching when the cache is short", "value": {"symbols": ["CBA.AU"], "country_code": "AU", "exchange": "ASX", "sessions": 250}},
+                            "an_index": {"summary": "A rate, stated as one: the same symbol priced as a share is a different instrument", "value": {"symbols": ["US10Y"], "country_code": "US", "asset_class": "rates", "sessions": 60}}
                         }
                     }}},
                     "responses": {
                         "200": {"description": "Successful Response", "content": {"application/json": {"schema": {"type": "object"}}}},
                         "400": {"description": "Exchange or symbol refusal", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
                         "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}}
+                    }
+                }
+            },
+            "/bars/intraday": {
+                "post": {
+                    "tags": ["market data"],
+                    "summary": "5-minute bars and their 15m/30m/1h/4h aggregates",
+                    "operationId": "post_intraday_bars_intraday_post",
+                    "description": "Every timeframe is derived from the same native 5-minute tape, anchored to the exchange's local session: a 4-hour bucket resets at each session's first bar and never straddles the overnight gap. `d` is an exchange-local ISO timestamp, not a session date. A cache hit inside MDS_INTRADAY_TTL_SECONDS (300 s) costs no vendor units; a fetch bills 5 per symbol and is named in `fetched`.",
+                    "requestBody": {"required": true, "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/IntradayRequest"},
+                        "examples": {
+                            "one_session_of_5m": {"summary": "One US session of 5-minute bars, fetching if the tape is short", "value": {"symbols": ["TTD"], "country_code": "US", "timeframe": "5Min", "limit": 78}},
+                            "four_hour_aggregate": {"summary": "Four-hour bars aggregated from the same 5m tape", "value": {"symbols": ["TTD"], "country_code": "US", "timeframe": "4Hour", "limit": 48}},
+                            "cache_only": {"summary": "Never call the vendor: the owned tape answers or the symbol is reported short", "value": {"symbols": ["AAPL"], "country_code": "US", "timeframe": "1Hour", "limit": 24, "allow_fetch": false}}
+                        }
+                    }}},
+                    "responses": {
+                        "200": {"description": "Bars per symbol, plus `fetched` (the spend evidence) and `short_history`", "content": {"application/json": {"schema": {"type": "object"}}}},
+                        "400": {"description": "Exchange or symbol refusal", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}},
+                        "502": {"description": "The vendor failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "503": {"description": "No vendor client or no database", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+                    }
+                }
+            },
+            "/bars/bulk": {
+                "post": {
+                    "tags": ["market data"],
+                    "summary": "Whole-market closes for one to ten sessions",
+                    "operationId": "post_bulk_bars_bulk_post",
+                    "description": "`c` is the split-adjusted close. A session is served from the cache only when a completed pull is recorded for it: a partial session silently changes every derived return that reads it. A pull that is materially short of the previous completed session is returned with its key in `partial` and writes no completeness marker, so a later cache read re-asks the vendor.",
+                    "requestBody": {"required": true, "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/BulkRequest"},
+                        "examples": {
+                            "latest_and_a_past_session": {"summary": "The latest completed session and one dated pull", "value": {"market": "US", "dates": ["latest", "2026-08-13"]}},
+                            "cache_only": {"summary": "Refuse rather than return a session no completed pull is recorded for", "value": {"market": "US", "dates": ["2026-11-07"], "allow_fetch": false}}
+                        }
+                    }}},
+                    "responses": {
+                        "200": {"description": "One entry per requested date key, keyed as the caller spelled it", "content": {"application/json": {"schema": {"type": "object"}}}},
+                        "404": {"description": "The session is not pulled and fetching is off (`not-pulled`)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}},
+                        "502": {"description": "The vendor failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "503": {"description": "No vendor client or no database", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+                    }
+                }
+            },
+            "/screener": {
+                "post": {
+                    "tags": ["market data"],
+                    "summary": "Raw vendor screener rows for one market",
+                    "operationId": "post_screener_screener_post",
+                    "description": "Transport only: the caller owns the floors, ranking and limits. The venue travels inside `filters` — exactly one `[\"exchange\", \"=\", venue]` triple is appended last, using the caller's spelling rather than the resolved market, so a per-venue NASDAQ screen is not collapsed into the US umbrella. Rows are the vendor's objects, untouched; every filter is validated against the vendor's 14 fields before a unit is spent.",
+                    "requestBody": {"required": true, "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/ScreenerRequest"},
+                        "examples": {
+                            "us_liquid_movers": {"summary": "Liquid US names up 5% over five days, ranked by that return", "value": {"country_code": "US", "filters": [["market_capitalization", ">", 300000000], ["refund_5d_p", ">", 5]], "sort": "refund_5d_p.desc", "limit": 50}},
+                            "one_venue": {"summary": "One US venue, which is what the vendor's exchange filter must name", "value": {"country_code": "US", "exchange": "NASDAQ", "filters": [["avgvol_200d", ">", 500000]], "limit": 100}}
+                        }
+                    }}},
+                    "responses": {
+                        "200": {"description": "The vendor's rows and the query that produced them", "content": {"application/json": {"schema": {"type": "object"}}}},
+                        "400": {"description": "The exchange filter and the country name different markets", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "422": {"description": "A bad field, operator, sort or bound, or the vendor rejected the query", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "502": {"description": "The vendor failed", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "503": {"description": "No vendor client", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
+                    }
+                }
+            },
+            "/profile": {
+                "post": {
+                    "tags": ["market data"],
+                    "summary": "Company profile for up to 25 listings",
+                    "operationId": "post_profile_profile_post",
+                    "description": "One pinned vendor call per uncached symbol (5 units each, one hour memo). The profile fields are the ones a screener row carries: there is no entitled source for `description`, GICS names or country, so those keys are always null rather than absent. A symbol with no matching listing is `found: false` and named in `missing`, never an error for the batch.",
+                    "requestBody": {"required": true, "content": {"application/json": {
+                        "schema": {"$ref": "#/components/schemas/ProfilesRequest"},
+                        "examples": {
+                            "asx_names": {"summary": "Three ASX listings", "value": {"symbols": ["WDS", "BHP", "CBA"], "country_code": "AU", "exchange": "ASX"}},
+                            "us_batch": {"summary": "Fifteen US tickers, within the 25-symbol cap", "value": {"symbols": ["AAPL", "MSFT", "NVDA"], "country_code": "US"}}
+                        }
+                    }}},
+                    "responses": {
+                        "200": {"description": "Per-symbol profiles, each with `found` and its own `error`", "content": {"application/json": {"schema": {"type": "object"}}}},
+                        "400": {"description": "Exchange or symbol refusal", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}},
+                        "422": {"description": "Validation Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}}},
+                        "503": {"description": "No vendor client", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}}
                     }
                 }
             }
@@ -348,6 +439,7 @@ pub fn document() -> Value {
                                     "description": "One or more bare or suffixed symbols. One request is one market, so every symbol must belong to country_code."},
                         "country_code": country_schema(),
                         "exchange": exchange_schema(),
+                        "asset_class": asset_class_schema(),
                         "max_age_seconds": {"type": ["number", "null"], "minimum": 0, "example": 60,
                                             "description": "Maximum cache age in seconds. The default is 300; a caller may only ask for something newer, never staler."}
                     },
@@ -370,6 +462,7 @@ pub fn document() -> Value {
                                       "description": "simple (default, the N-bar mean) or wilder (Wilder's recursion)."},
                         "country_code": country_schema(),
                         "exchange": exchange_schema(),
+                        "asset_class": asset_class_schema(),
                         "price": {"type": ["number", "null"], "example": 231.4,
                                   "description": "Reference price for a stop level. Supplying it without multiplier is a 400 incomplete-stop."},
                         "multiplier": {"type": ["number", "null"], "example": 2.0,
@@ -390,10 +483,74 @@ pub fn document() -> Value {
                                      "description": "Completed sessions to return. The session still in progress is always excluded."},
                         "country_code": country_schema(),
                         "exchange": exchange_schema(),
+                        "asset_class": asset_class_schema(),
                         "allow_fetch": {"type": "boolean", "default": true, "example": false,
                                         "description": "false answers only from the cache and never calls a vendor."}
                     },
                     "required": ["symbols", "country_code"]
+                },
+                "ScreenerRequest": {
+                    "type": "object",
+                    "properties": {
+                        "country_code": country_schema(),
+                        "exchange": exchange_schema(),
+                        "filters": {"type": "array", "maxItems": 64,
+                                    "items": {"type": "array", "minItems": 3, "maxItems": 3,
+                                              "items": {}},
+                                    "example": [["market_capitalization", ">", 300000000], ["refund_5d_p", ">", 5]],
+                                    "description": "Triples of [field, operator, value]. The 14 fields are code, name, exchange, sub_exchange, sector, industry, market_capitalization, earnings_share, dividend_yield, adjusted_close, avgvol_1d, avgvol_200d, refund_1d_p, refund_5d_p. Numeric fields take =, !=, >, <, >=, <=; text fields take = and in only. An `exchange` entry is lifted into the single triple the vendor needs. Derived fields (return_3m_p, return_100d_p, return_200d_p) are refused: read whole-market closes from POST /bars/bulk and compute them there."},
+                        "sort": {"anyOf": [{"type": "string"}, {"type": "null"}], "example": "refund_5d_p.desc",
+                                 "description": "<field>.<asc|desc>. The direction is required because the vendor's default is not documented. A derived field cannot be sorted on."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 100, "example": 50,
+                                  "description": "Rows to return. 500 is the verified vendor cap."},
+                        "offset": {"type": "integer", "minimum": 0, "default": 0, "example": 0,
+                                   "description": "Rows to skip."}
+                    },
+                    "required": ["country_code"]
+                },
+                "ProfilesRequest": {
+                    "type": "object",
+                    "properties": {
+                        "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 25,
+                                    "example": ["WDS", "BHP", "CBA"],
+                                    "description": "One to 25 bare or suffixed symbols, all in country_code. 25 is the batch cost bound: five units per uncached symbol."},
+                        "country_code": country_schema(),
+                        "exchange": exchange_schema()
+                    },
+                    "required": ["symbols", "country_code"]
+                },
+                "IntradayRequest": {
+                    "type": "object",
+                    "properties": {
+                        "symbols": {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                    "example": ["TTD"],
+                                    "description": "One or more bare or suffixed symbols, all in country_code."},
+                        "timeframe": {"type": "string",
+                                      "enum": ["5Min", "15Min", "30Min", "1Hour", "4Hour",
+                                               "5m", "15m", "30m", "1h", "4h"],
+                                      "example": "4Hour",
+                                      "description": "5Min, 15Min, 30Min, 1Hour or 4Hour, case-insensitively. Every frame is derived from the same native 5-minute tape, anchored to the exchange's local session."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 78, "example": 48,
+                                  "description": "Buckets to return, newest first after the session anchor. The default is one US session of 5-minute bars."},
+                        "allow_fetch": {"type": "boolean", "default": true, "example": true,
+                                        "description": "false serves the owned 5-minute tape only and never calls a vendor."},
+                        "country_code": country_schema(),
+                        "exchange": exchange_schema()
+                    },
+                    "required": ["symbols", "timeframe", "country_code"]
+                },
+                "BulkRequest": {
+                    "type": "object",
+                    "properties": {
+                        "market": {"type": "string", "enum": ["US", "AU"], "default": "US", "example": "US",
+                                   "description": "Which market's whole session to read or pull."},
+                        "dates": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 10,
+                                  "example": ["latest", "2026-08-13"],
+                                  "description": "One to ten distinct entries, each \"latest\" or YYYY-MM-DD. \"latest\" resolves through the same completed-session rule POST /bars uses; duplicates collapse."},
+                        "allow_fetch": {"type": "boolean", "default": true, "example": true,
+                                        "description": "false returns 404 not-pulled rather than returning a session no completed pull is recorded for."}
+                    },
+                    "required": ["dates"]
                 },
                 "EodhdKeyRequest": {
                     "type": "object",
@@ -438,13 +595,31 @@ fn exchange_schema() -> Value {
     json!({
         "anyOf": [
             {"type": "string", "enum": [
-                "US", "NYSE", "NASDAQ", "AMEX", "NYSEARCA",
+                "US", "NYSE", "NASDAQ", "AMEX", "NYSEARCA", "ARCA", "BATS", "IEX",
                 "AU", "ASX", "AX", "AUS"
             ]},
             {"type": "null"}
         ],
         "example": "ASX",
-        "description": "Optional second spelling of the country. US: US, NYSE, NASDAQ, AMEX, NYSEARCA. AU: AU, ASX, AX, AUS. Must agree with country_code; a disagreement is a 400 exchange-conflict."
+        "description": "Optional second spelling of the country. US: US, NYSE, NASDAQ, AMEX, NYSEARCA, ARCA, BATS, IEX. AU: AU, ASX, AX, AUS. Must agree with country_code; a disagreement is a 400 exchange-conflict. On POST /screener the caller's spelling is what travels to the vendor, so a per-venue screen stays per-venue."
+    })
+}
+
+fn asset_class_schema() -> Value {
+    json!({
+        "anyOf": [
+            {"type": "string", "enum": [
+                "shares", "equities", "equity",
+                "crypto", "cryptocurrency",
+                "indices", "indicies", "index",
+                "commodities", "commodity", "futures", "future",
+                "rates", "rate", "bonds",
+                "forex", "fx", "currency"
+            ]},
+            {"type": "null"}
+        ],
+        "example": "indices",
+        "description": "Optional. Absent means shares, which is what every existing caller means. Stating it matters: an index, commodity ETF proxy or rate priced as a share is a different instrument, and the ones whose rendering differs come back unpriced. An unrecognised spelling is a 422 unknown-asset-class rather than a silent share."
     })
 }
 

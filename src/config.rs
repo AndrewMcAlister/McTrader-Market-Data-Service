@@ -39,6 +39,17 @@ pub const DEFAULT_MIN_SESSIONS: i64 = 15;
 /// of the window, so the history past what a caller asked for is already paid for.
 pub const DEFAULT_HISTORY_SESSIONS: i64 = 560;
 
+/// How long the owned 5-minute tape answers an intraday request before the vendor is asked
+/// again. Five minutes: an intraday bar is a moment, and the same figure as a price's TTL.
+pub const DEFAULT_INTRADAY_TTL_SECONDS: f64 = 300.0;
+
+/// How many days of 5-minute bars the owned table keeps.
+///
+/// Thirty days is ~936,000 rows at 200 symbols, which is the headroom rule's answer for a tape
+/// whose only consumer reads the current session. A longer window is a backfill decision, not
+/// an endpoint's.
+pub const DEFAULT_INTRADAY_RETENTION_DAYS: i64 = 30;
+
 /// The periods the consumer set actually reads.
 pub const DEFAULT_ATR_PERIODS: [i64; 5] = [14, 20, 22, 26, 50];
 
@@ -120,6 +131,10 @@ pub struct Settings {
     pub schedule_price_universe: i64,
     pub min_sessions: i64,
     pub history_sessions: i64,
+    /// How long the owned 5-minute tape answers before `/bars/intraday` asks the vendor again.
+    pub intraday_ttl_seconds: f64,
+    /// How many days of 5-minute bars the owned table keeps.
+    pub intraday_retention_days: i64,
     pub atr_periods: Vec<i64>,
     pub atr_period: i64,
     /// Gap-inclusive true range. `high_low` is available and is NOT the default, because
@@ -199,6 +214,16 @@ impl Settings {
             ),
             min_sessions: env_int(lookup, "MDS_MIN_SESSIONS", DEFAULT_MIN_SESSIONS),
             history_sessions: env_int(lookup, "MDS_HISTORY_SESSIONS", DEFAULT_HISTORY_SESSIONS),
+            intraday_ttl_seconds: env_float(
+                lookup,
+                "MDS_INTRADAY_TTL_SECONDS",
+                DEFAULT_INTRADAY_TTL_SECONDS,
+            ),
+            intraday_retention_days: env_int(
+                lookup,
+                "MDS_INTRADAY_RETENTION_DAYS",
+                DEFAULT_INTRADAY_RETENTION_DAYS,
+            ),
             atr_periods: if periods.is_empty() {
                 DEFAULT_ATR_PERIODS.to_vec()
             } else {
@@ -322,6 +347,8 @@ mod tests {
         assert_eq!(settings.bulk_breakeven, 100);
         assert_eq!(settings.min_sessions, 15);
         assert_eq!(settings.history_sessions, 560);
+        assert_eq!(settings.intraday_ttl_seconds, 300.0);
+        assert_eq!(settings.intraday_retention_days, 30);
         assert_eq!(settings.atr_periods, vec![14, 20, 22, 26, 50]);
         assert_eq!(settings.atr_method, "tr");
         assert_eq!(settings.atr_smoothing, "simple");
@@ -396,6 +423,16 @@ mod tests {
         ]);
         assert_eq!(settings.atr_method, "high_low");
         assert_eq!(settings.atr_smoothing, "wilder");
+    }
+
+    #[test]
+    fn the_intraday_settings_are_read_from_their_own_variables() {
+        let settings = settings_with(&[
+            ("MDS_INTRADAY_TTL_SECONDS", " 90 "),
+            ("MDS_INTRADAY_RETENTION_DAYS", "7"),
+        ]);
+        assert_eq!(settings.intraday_ttl_seconds, 90.0);
+        assert_eq!(settings.intraday_retention_days, 7);
     }
 
     #[test]

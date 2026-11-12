@@ -21,7 +21,8 @@ the proof that the decision still lives in that file.
   unknown exchange code.
 - **Clear:** Send `country_code` — `US` or `AU` — with bare symbols, or suffix every symbol the
   same way and state the matching country. An internal caller may still state a crypto asset
-  class, which resolves to `CRYPTO`; no HTTP request can.
+  class, which resolves to `CRYPTO`; an HTTP request can now state one too, but only a spelling
+  the strict parser accepts (see G-20).
 - **Config:** none.
 - **Tests:** `src/domain/exchanges.rs` · `exchange_and_country_code_that_disagree_are_refused`
 
@@ -247,3 +248,88 @@ be visible in the log rather than indistinguishable from an authorised one.
 
 The books use 1.0, 2.0 and 3.0. Defaulting the multiplier would return a confident stop the
 caller never asked for; guessing is worse than refusing because a stop level is acted on.
+
+## G-17 · Screener venue agreement
+
+- **Location:** `src/domain/screener.rs` · `fn agreeing_venue(`
+- **Gates:** `POST /screener` — whether a query's venue may reach the vendor, and as which value.
+- **Trigger:** An `exchange` filter whose value resolves to a market other than the one the
+  request named (`400 exchange-conflict`); an `in` spanning two markets (`400 mixed-exchanges`);
+  a code in neither alias table (`400 unknown-exchange`).
+- **Clear:** State one market at the top level (`country_code`, optionally `exchange`) and filter
+  on one venue. An agreeing `exchange` filter is lifted and replaced by exactly one
+  `["exchange", "=", venue]` triple, which is appended last.
+- **Config:** none.
+- **Tests:** `src/domain/screener.rs` · `an_in_across_two_markets_is_refused`
+
+The vendor ignores a bare top-level `exchange` parameter: the venue only works inside `filters`.
+An unrecognised venue value answers HTTP 200 with **zero rows**, so a wrong venue looks like an
+empty screen rather than a broken query. The appended triple uses the caller's spelling
+(`NASDAQ`, `BATS`) rather than the resolved market code, because collapsing every per-venue US
+screen into `US` would widen it silently.
+
+## G-18 · Profile memo
+
+- **Location:** `src/products.rs` · `PROFILE_TTL_SECONDS`
+- **Gates:** Whether `POST /profile` spends 5 units on a symbol or answers from memory.
+- **Trigger:** The `(root, market)` entry is absent or older than 3600 s; the memo holds 4096
+  entries.
+- **Clear:** A successful lookup is memoised. A miss (`found:false`) and a failed call are
+  **never** inserted, so the next request asks again rather than caching "not there".
+- **Config:** none; the interval and the cap are constants.
+- **Tests:** `tests/products.rs` · `a_profile_memo_hit_costs_nothing_and_the_ttl_expires`
+
+One pinned screener call per uncached symbol is 5 units, so a 25-symbol pass costs 125. The memo
+is what makes the second pass free. It deliberately does not memoise a miss: a listing can appear
+between two calls, and an hour of "no such company" is a worse answer than one more 5-unit call.
+At the cap a fresh profile is returned but not kept, with one warning.
+
+## G-19 · `unknown-exchange`
+
+- **Location:** `src/domain/exchanges.rs` · `fn exchange_for(`
+- **Gates:** Every symbol-bearing route, plus `/bars/bulk`'s `market`.
+- **Trigger:** A code that is neither a served country nor a known vendor alias, or a blank one.
+- **Clear:** Send one of the codes the refusal lists (`US`, `AU`, `LSE`, `TSX`, …).
+- **Config:** none; the table is `COUNTRIES` in `src/domain/availability.rs`.
+- **Tests:** `src/domain/exchanges.rs` · `an_unknown_market_is_refused_by_name_not_defaulted_to_us`
+
+An exchange code the vendor does not know answers HTTP 200 with zero rows, so a typo reads as
+"nothing matched today". Refusing it locally is the only way the caller can tell the two apart.
+The same reasoning is why a blank code is not the house default on the HTTP surface: a caller
+that stated nothing has not stated `US`.
+
+## G-20 · `unknown-asset-class`
+
+- **Location:** `src/api/dto.rs` · `fn require_asset_class(`
+- **Gates:** `GET /price/{symbol}`, `POST /prices`, `POST /atr`, `POST /bars`.
+- **Trigger:** A stated `asset_class` that the strict parser does not recognise → `422`
+  `unknown-asset-class` with the accepted spellings.
+- **Clear:** Omit the field (shares, the historical behaviour) or state one of the accepted
+  names.
+- **Config:** none; the vocabulary is `ASSET_CLASS_SPELLINGS` in `src/domain/asset_class.rs`.
+- **Tests:** `src/api/tests.rs` · `an_unknown_asset_class_is_a_422_naming_the_vocabulary_on_every_route`
+
+The library's `AssetClass::parse` still folds an unknown spelling to shares, because internal
+callers hold a class rather than a request. The HTTP boundary uses the strict parser instead: a
+typo must be refused where the caller can see it. An index priced as a share is a different
+instrument, and the silent fold is what made seven market-picture requests come back `unpriced`.
+
+## G-21 · `not-pulled`
+
+- **Location:** `src/products.rs` · `fn bulk_pull_is_complete(`
+- **Gates:** Whether `POST /bars/bulk` may serve a cached session, and whether a pull is marked
+  complete.
+- **Trigger:** No `BulkSnapshotPull` marker for `(market, session)` and `allow_fetch:false` →
+  `404 not-pulled`. After a pull: fewer rows than half the previous completed session's count, or
+  no rows at all → no marker, and the requested key comes back in `partial`.
+- **Clear:** `allow_fetch:true` re-pulls the session (100 units); a complete pull writes the
+  marker and every later read of it is free.
+- **Config:** none; the floor is `BULK_MIN_COMPLETENESS_RATIO`.
+- **Tests:** `tests/products.rs` · `a_pull_far_below_the_previous_session_is_partial_and_writes_no_marker`
+
+The latest session in `DailySnapshot` can hold 1,881 rows against the ~27,714 a completed pull
+writes, because the vendor is still writing it. A partial set silently changes every derived
+return that reads it, and nothing later can tell the difference. So the completeness fact is
+recorded only when a pull is whole; an unmarked session is returned once, on the response of the
+pull that produced it, and never served as complete afterwards.
+

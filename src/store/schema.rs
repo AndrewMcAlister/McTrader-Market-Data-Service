@@ -87,10 +87,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_schema_file_is_embedded_and_creates_the_three_owned_tables() {
+    fn the_schema_file_is_embedded_and_creates_every_owned_table() {
         assert!(SCHEMA_SQL.contains("dbo.SymbolPriceCache"));
         assert!(SCHEMA_SQL.contains("dbo.DailySnapshot"));
         assert!(SCHEMA_SQL.contains("dbo.IndicatorCache"));
+        assert!(SCHEMA_SQL.contains("dbo.IntradayBar5Min"));
+        assert!(SCHEMA_SQL.contains("dbo.BulkSnapshotPull"));
+    }
+
+    #[test]
+    fn the_intraday_index_is_created_with_its_table() {
+        // 002_indexes.sql is a manual load-quiet swap the service never applies, so an index
+        // placed there would never exist for this table.
+        assert!(SCHEMA_SQL.contains("IX_IntradayBar5Min_Symbol"));
+        assert!(SCHEMA_SQL.contains("ON dbo.IntradayBar5Min (SymbolCode, Exchange, TsUtc DESC)"));
+    }
+
+    #[test]
+    fn the_screener_tariff_row_is_guarded_and_flat_five() {
+        assert!(SCHEMA_SQL.contains("RequestType = N''/screener''"));
+        assert!(SCHEMA_SQL.contains("N''flat'', 5"));
     }
 
     #[test]

@@ -33,11 +33,12 @@ use mmds::providers::base::{Provider, ProviderBar, ProviderQuote, WholeMarketQuo
 use mmds::providers::router::ProviderRouter;
 use mmds::refresh::{bulk_request_type, RefreshFailure, RefreshJobs, RefreshStore, RefreshVendor};
 use mmds::store::models::{
-    CachedPrice, DailyBarWrite, IndicatorWrite, Movers, PriceRow, SeriesKey, SessionSymbolCount,
-    StoredBar, StoredIndicator, UsageSummary,
+    CachedPrice, DailyBarWrite, IndicatorWrite, IntradayBarWrite, Movers, PriceRow, SeriesKey,
+    SessionSymbolCount, StoredBar, StoredIndicator, StoredIntradayBar, UsageSummary,
 };
 use mmds::store::{
-    DailyBarRepository, IndicatorRepository, PriceRepository, StoreError, UsageRepository,
+    BulkPullRepository, DailyBarRepository, IndicatorRepository, IntradayRepository,
+    PriceRepository, StoreError, UsageRepository,
 };
 use mmds::usage::TariffRow;
 
@@ -143,6 +144,14 @@ struct State {
     indicator_writes: Vec<IndicatorWrite>,
     tariff: Vec<TariffRow>,
     usage: Vec<RecordedUsage>,
+    /// `(exchange, symbol) -> (instant -> bar)`, keyed the way `IntradayBar5Min` is.
+    intraday: HashMap<(String, String), BTreeMap<NaiveDateTime, StoredIntradayBar>>,
+    intraday_writes: usize,
+    /// `(market, session) -> the row count a completed pull wrote`.
+    bulk_pulls: HashMap<(String, NaiveDate), i64>,
+    /// What a write stamps on `FetchedUtc`. The real table uses `SYSUTCDATETIME()`; a fake with
+    /// no clock of its own would make every TTL assertion a coincidence, so the test states it.
+    now: NaiveDateTime,
 }
 
 /// One row the ledger was asked to record.
@@ -162,6 +171,8 @@ impl FakeStore {
                 tariff_row("/real-time/", "per_symbol", Some(1)),
                 tariff_row("/real-time?ex=US", "flat", Some(100)),
                 tariff_row("/eod/", "per_call", Some(1)),
+                tariff_row("/intraday/", "per_call", Some(5)),
+                tariff_row("/screener", "flat", Some(5)),
                 tariff_row("/eod-bulk-last-day/US", "flat", Some(100)),
                 tariff_row("/eod-bulk-last-day/AU", "flat", Some(100)),
             ],
@@ -326,6 +337,66 @@ impl FakeStore {
 
     pub fn recorded_usage(&self) -> Vec<RecordedUsage> {
         self.state().usage.clone()
+    }
+
+    /// Say what a write's `FetchedUtc` should be, as the database's clock would.
+    pub fn set_now(&self, now: NaiveDateTime) {
+        self.state().now = now;
+    }
+
+    /// Put a native intraday bar into the tape without counting it as a write.
+    pub fn seed_intraday(&self, exchange: &str, symbol: &str, rows: Vec<IntradayBarWrite>) {
+        let mut state = self.state();
+        let now = state.now;
+        let bucket = state
+            .intraday
+            .entry((exchange.to_string(), symbol.to_string()))
+            .or_default();
+        for row in rows {
+            bucket.insert(
+                row.ts_utc,
+                StoredIntradayBar {
+                    symbol: row.symbol.clone(),
+                    exchange: exchange.to_string(),
+                    ts_utc: row.ts_utc,
+                    open: Some(row.open),
+                    high: Some(row.high),
+                    low: Some(row.low),
+                    close: Some(row.close),
+                    volume: Some(row.volume),
+                    adjusted: row.adjusted,
+                    fetched_at: Some(now),
+                },
+            );
+        }
+    }
+
+    /// How many native intraday rows the tape holds for a series.
+    pub fn intraday_rows(&self, exchange: &str, symbol: &str) -> usize {
+        self.state()
+            .intraday
+            .get(&(exchange.to_string(), symbol.to_string()))
+            .map(BTreeMap::len)
+            .unwrap_or(0)
+    }
+
+    pub fn intraday_writes(&self) -> usize {
+        self.state().intraday_writes
+    }
+
+    /// Record a completed whole-market pull, as an earlier process would have left it.
+    pub fn seed_bulk_pull(&self, market: &str, session: NaiveDate, rows: i64) {
+        self.state()
+            .bulk_pulls
+            .insert((market.to_string(), session), rows);
+    }
+
+    pub fn bulk_pulls(&self) -> Vec<((String, NaiveDate), i64)> {
+        self.state()
+            .bulk_pulls
+            .iter()
+            .map(|(key, rows)| (key.clone(), *rows))
+            .collect()
     }
 }
 
@@ -565,6 +636,141 @@ impl DailyBarRepository for FakeStore {
             .collect();
         keys.sort();
         Ok(keys)
+    }
+
+    async fn session_closes(
+        &self,
+        exchange: &str,
+        session: NaiveDate,
+    ) -> Result<BTreeMap<String, f64>, StoreError> {
+        let state = self.state();
+        Ok(state
+            .daily
+            .iter()
+            .filter(|((row_exchange, _), _)| row_exchange == exchange)
+            .filter_map(|((_, symbol), bucket)| {
+                bucket
+                    .get(&session)
+                    .map(|row| (symbol.clone(), row.close))
+            })
+            .collect())
+    }
+}
+
+#[async_trait]
+impl IntradayRepository for FakeStore {
+    async fn get_intraday_bars(
+        &self,
+        exchange: &str,
+        symbol: &str,
+        limit: i64,
+    ) -> Result<Vec<StoredIntradayBar>, StoreError> {
+        let state = self.state();
+        let take = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+        let rows = state
+            .intraday
+            .get(&(exchange.to_string(), symbol.trim().to_uppercase()))
+            .map(|bucket| {
+                let all: Vec<StoredIntradayBar> = bucket.values().cloned().collect();
+                let start = all.len().saturating_sub(take);
+                all[start..].to_vec()
+            })
+            .unwrap_or_default();
+        Ok(rows)
+    }
+
+    async fn upsert_intraday(&self, rows: Vec<IntradayBarWrite>) -> Result<usize, StoreError> {
+        let mut state = self.state();
+        let now = state.now;
+        let written = rows.len();
+        for row in rows {
+            let exchange = row.exchange.clone().unwrap_or_default();
+            let bucket = state
+                .intraday
+                .entry((exchange.clone(), row.symbol.clone()))
+                .or_default();
+            bucket.insert(
+                row.ts_utc,
+                StoredIntradayBar {
+                    symbol: row.symbol,
+                    exchange,
+                    ts_utc: row.ts_utc,
+                    open: Some(row.open),
+                    high: Some(row.high),
+                    low: Some(row.low),
+                    close: Some(row.close),
+                    volume: Some(row.volume),
+                    adjusted: row.adjusted,
+                    fetched_at: Some(now),
+                },
+            );
+        }
+        state.intraday_writes += written;
+        Ok(written)
+    }
+
+    async fn prune_intraday(&self, before: NaiveDateTime) -> Result<usize, StoreError> {
+        let mut state = self.state();
+        let mut deleted = 0usize;
+        for bucket in state.intraday.values_mut() {
+            let stale: Vec<NaiveDateTime> = bucket
+                .keys()
+                .filter(|instant| **instant < before)
+                .copied()
+                .collect();
+            for instant in stale {
+                bucket.remove(&instant);
+                deleted += 1;
+            }
+        }
+        Ok(deleted)
+    }
+}
+
+#[async_trait]
+impl BulkPullRepository for FakeStore {
+    async fn bulk_pull_marker(
+        &self,
+        market: &str,
+        session: NaiveDate,
+    ) -> Result<Option<i64>, StoreError> {
+        Ok(self
+            .state()
+            .bulk_pulls
+            .get(&(market.to_string(), session))
+            .copied())
+    }
+
+    async fn latest_bulk_pull_before(
+        &self,
+        market: &str,
+        session: NaiveDate,
+    ) -> Result<Option<mmds::store::bulk::BulkPullMarker>, StoreError> {
+        let state = self.state();
+        Ok(state
+            .bulk_pulls
+            .iter()
+            .filter(|((row_market, row_session), _)| {
+                row_market == market && *row_session < session
+            })
+            .max_by_key(|((_, row_session), _)| *row_session)
+            .map(|((_, row_session), rows)| mmds::store::bulk::BulkPullMarker {
+                session: *row_session,
+                rows: *rows,
+            }))
+    }
+
+    async fn record_bulk_pull(
+        &self,
+        market: &str,
+        session: NaiveDate,
+        rows: i64,
+        _provider: &str,
+    ) -> Result<(), StoreError> {
+        self.state()
+            .bulk_pulls
+            .insert((market.to_string(), session), rows);
+        Ok(())
     }
 }
 

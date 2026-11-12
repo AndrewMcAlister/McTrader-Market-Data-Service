@@ -10,6 +10,26 @@ error codes, and the traps that produce wrong code if ignored.
 - **Implementation:** Rust crate `mmds`; binaries `mmds-service`, `mmds-daily`, `mmds-mcp` and
   `mmds-tool`
 
+## Routes
+
+| Route | Returns | Format |
+|---|---|---|
+| `GET /price/{symbol}` | one symbol's latest quote | REST |
+| `POST /prices` | quotes for a batch — **also the whole-market call** | REST |
+| `POST /atr` | ATR and an optional stop level | REST |
+| `POST /bars` | completed **daily** bars | REST |
+| `POST /bars/intraday` | 5-minute bars and their 15m/30m/1h/4h aggregates | REST |
+| `POST /bars/bulk` | whole-market closes for one to ten sessions | REST |
+| `POST /screener` | raw vendor screener rows for one market | REST |
+| `POST /profile` | company profile for up to 25 listings | REST |
+| `GET /todays-data-is-available`, `GET /todays-big-movers` | today's observation, ranked movers | REST |
+| `GET /market/*`, `GET /trading_sessions`, `GET /schedule`, `POST /schedule/run` | the market clock and the collection schedule | REST |
+| `POST /refresh`, `POST /secrets/eodhd`, `GET /stats`, `GET /healthz`, `POST /admin/shutdown` | operations | REST |
+| `/mcp` (separate binary, optional) | the original four products as MCP tools | MCP |
+
+The four new routes are **REST only**: they are not exposed as MCP tools, because they are
+transport for a service-to-service caller rather than a surface to invite a model to drive.
+
 ---
 
 ## Choosing the market — every symbol endpoint requires a country code
@@ -47,10 +67,23 @@ The market that was used comes back on every answer (`exchange` on `/prices` and
 per-symbol on `/bars`, and per-quote on `/price`), so a caller never has to assume which
 instrument a number belongs to.
 
-**There is no asset-class request field.** The vendor taxonomy behind it was not reliable, so
-every symbol is treated as a share and takes the EODHD → Yahoo route. Crypto, indices,
-commodities, rates and forex are not selectable over this API; a crypto pair sent as a share is
-priced from the share feeds, which will usually answer `unpriced`.
+**`asset_class` is optional on the four symbol routes.** Absent means `shares`, which is what
+every existing caller means and is unchanged. Present and recognised means that class:
+
+| Class | Accepted spellings |
+|---|---|
+| `shares` | `shares`, `equities`, `equity` |
+| `crypto` | `crypto`, `cryptocurrency` |
+| `indices` | `indices`, `indicies`, `index` |
+| `commodities` | `commodities`, `commodity`, `futures`, `future` |
+| `rates` | `rates`, `rate`, `bonds` |
+| `forex` | `forex`, `fx`, `currency` |
+
+A spelling outside that list is `422 unknown-asset-class`, and the `detail` names the accepted
+list. This is strict on purpose: the library's internal parser folds an unknown spelling to
+`shares`, and at the HTTP boundary that fold is a silent reclassification — an index priced as a
+share is a different instrument, which is why `IXIC`, `GSPC`, `GLD`, `SLV`, `BNO`, `UUP` and
+`US10Y` came back `unpriced` while the field was unstateable.
 
 ---
 
@@ -63,7 +96,8 @@ Latest price for one symbol.
 | Name | Type | Default | Notes |
 |---|---|---|---|
 | `country_code` | string | **required** | `US` or `AU`. The market the ticker is in — `CBA` is both an ASX and a US listing. Missing or unknown is a 422 |
-| `exchange` | string | none | Optional second spelling of the same fact: `US`/`NYSE`/`NASDAQ`/`AMEX`/`NYSEARCA`, `AU`/`ASX`/`AX`/`AUS`. Must agree with `country_code` |
+| `exchange` | string | none | Optional second spelling of the same fact: `US`/`NYSE`/`NASDAQ`/`AMEX`/`NYSEARCA`/`ARCA`/`BATS`/`IEX`, `AU`/`ASX`/`AX`/`AUS`. Must agree with `country_code` |
+| `asset_class` | string | `shares` | Optional. `indices` for `IXIC`/`GSPC`, `commodities`/`rates` for the ETF proxies and rates. Unknown spelling is `422 unknown-asset-class` (§Choosing the market) |
 | `max_age_seconds` | float | `300` | **Lowers** the cache window; cannot raise it. |
 
 `country_code` is required: `GET /price/AAPL?country_code=US` is the shape. `exchange` is
@@ -96,6 +130,7 @@ optional and must agree with it; a disagreement — or a symbol suffix that cont
 | 400 | `unknown-exchange`, `exchange-conflict` | the market could not be resolved — see §Choosing the market |
 | 404 | `unpriced` | nothing could price it |
 | 422 | FastAPI-shaped `detail` | `country_code` missing or not `US`/`AU` |
+| 422 | `unknown-asset-class` | `asset_class` is not a recognised spelling |
 | 502 | vendor reason | the vendor refused |
 | 503 | `vendor-unavailable` | the service has no vendor client configured |
 | 503 | `database-busy` | transient lock; **retry** |
@@ -118,7 +153,8 @@ separate endpoint.
 ```
 
 `country_code` is required; `exchange` is an optional spelling of the same fact and must agree
-with it (§Choosing the market). The market used is echoed as `exchange` in the response.
+with it (§Choosing the market). `asset_class` is optional and applies to the whole batch. The
+market used is echoed as `exchange` in the response.
 
 **200 response**
 
@@ -181,6 +217,7 @@ else computed from daily bars.
 |---|---|---|
 | `country_code` | **required** | `US` or `AU` — the market the series is measured on. See §Choosing the market |
 | `exchange` | none | optional second spelling of the same fact; must agree with `country_code` |
+| `asset_class` | `shares` | optional; the class the whole batch is measured as (§Choosing the market) |
 | `period` | `14` | |
 | `method` | `tr` | `tr` = gap-inclusive true range (the standard); `high_low` = High−Low only |
 | `smoothing` | `simple` | `simple` = mean of the last N ranges (the standard); `wilder` |
@@ -289,10 +326,256 @@ at `AU` is a different instrument from `AAPL` at `US`. An exchange with a short 
 
 `allow_fetch: false` answers only from the database and never calls a vendor.
 
+`asset_class` is optional and applies to the whole batch; absent means `shares`.
+
 **The session in progress is already excluded.** Do not filter it again downstream.
 
 **Errors:** 400 `bad-sessions`, `no-symbols`, `unknown-exchange`, `exchange-conflict`, `mixed-exchanges`;
-422 `country_code` missing or unknown; 502 vendor.
+422 `country_code` missing or unknown; 422 `unknown-asset-class`; 502 vendor.
+
+---
+
+## 4a. `POST /bars/intraday` — 5-minute bars and their aggregates
+
+```json
+{"symbols": ["TTD"], "country_code": "US", "timeframe": "4Hour", "limit": 48, "allow_fetch": true}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `symbols` | **required** | one or more; one request is one market |
+| `timeframe` | **required** | `5Min`, `15Min`, `30Min`, `1Hour`, `4Hour`, or `5m`/`15m`/`30m`/`1h`/`4h`. Case-insensitive. `1Day`/`1Week` are not intraday — use `POST /bars` |
+| `limit` | `78` | buckets to return, 1..500. The default is one US session of 5-minute bars |
+| `allow_fetch` | `true` | `false` serves the owned tape only and never calls a vendor |
+| `country_code` | **required** | `US` or `AU` (§Choosing the market) |
+| `exchange` | none | optional second spelling; must agree with `country_code` |
+
+**200 response**
+
+```json
+{
+  "exchange": "US",
+  "provider": "eodhd",
+  "fetched": ["TTD"],
+  "short_history": [],
+  "bars": {
+    "TTD": {
+      "symbol": "TTD", "exchange": "US",
+      "as_of_session": "2026-11-12",
+      "sessions": 2,
+      "adjusted": false,
+      "provider": "eodhd", "source": "eodhd",
+      "rows": [{"d": "2026-11-12T09:30:00", "o": 231.4, "h": 233.1,
+                "l": 230.9, "c": 232.7, "v": 1200300, "cr": null}]
+    }
+  }
+}
+```
+
+The series shape is `POST /bars`'s, so one decoder serves both. The differences, stated:
+
+- **`d` is an exchange-local ISO timestamp, not a session date.** An intraday bar is a moment.
+  A 78-bar US session therefore starts at `09:30:00` on the session's own date.
+- **`adjusted` is always `false`.** The vendor's intraday tape is unadjusted and carries no
+  separate raw print, so `cr` is always `null`.
+- **`provider` is `eodhd` when anything was fetched and `cache` when the owned tape answered every
+  symbol.** `fetched` is the spend evidence: 5 units per symbol fetched, nothing for a cache hit.
+
+**The buckets are anchored to the session, not to the series.** Each exchange-local session date
+is chunked consecutively from that session's first bar: 1 native bar per `5Min` bucket, 3 per
+`15Min`, 6 per `30Min`, 12 per `1Hour`, 48 per `4Hour`. A short final bucket is kept. This means
+a 4-hour bar is stable across requests and never straddles the overnight gap — unlike chunking
+from an arbitrary `now - window_days` start, where the same candle changes shape as the clock
+advances.
+
+The tape lives in the service's own table (`IntradayBar5Min`, native 5-minute rows only) and is
+refreshed when it is older than `MDS_INTRADAY_TTL_SECONDS` (300) or cannot supply `limit`
+buckets. Rows older than `MDS_INTRADAY_RETENTION_DAYS` (30) are pruned.
+
+**Errors:** 400 `no-symbols`, `bad-limit`, `unknown-exchange`, `exchange-conflict`,
+`mixed-exchanges`; 422 FastAPI-shaped for a missing/unknown `timeframe`, a `limit` outside 1..500,
+or a missing/unknown `country_code`; 502 vendor; 503 `vendor-unavailable` (no key),
+`database-unavailable`, `database-busy`.
+
+---
+
+## 4b. `POST /bars/bulk` — whole-market closes for several sessions
+
+```json
+{"market": "US", "dates": ["latest", "2026-08-13"], "allow_fetch": true}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `market` | `US` | `US` or `AU` — the whole-market pull's own word, the same one `POST /refresh` uses |
+| `dates` | **required** | 1..10 distinct entries, each `"latest"` or `YYYY-MM-DD`. `"latest"` resolves through the same completed-session rule as `POST /bars` |
+| `allow_fetch` | `true` | `false` returns `404 not-pulled` rather than answering from an unmarked session |
+
+**200 response**
+
+```json
+{
+  "market": "US",
+  "provider": "cache",
+  "partial": [],
+  "dates": {
+    "latest":    {"session": "2026-11-11", "rows": {"AAPL": {"c": 231.4}, "MSFT": {"c": 512.7}}},
+    "2026-08-13": {"session": "2026-08-13", "rows": {"AAPL": {"c": 218.9}}}
+  }
+}
+```
+
+`c` is the **adjusted** close: return windows are computed from the adjusted series. The served
+`dates` object is keyed by the requested key, so `"latest"` stays `"latest"` and its `session`
+names the session the service resolved.
+
+**A cached session is served only when a completed pull is recorded for it.** The latest session
+in the daily table can be partial — 1,881 rows against ~27,714 — and a partial set silently
+changes every derived return that reads it. So:
+
+- a **completed** pull is marked and every later read of it is free and complete;
+- a pull **materially below** the previous completed session's row count (or empty) is upserted but
+  **unmarked**, and its requested key is listed in `partial` on that response only;
+- `allow_fetch: false` on an unmarked session is `404 not-pulled`;
+- a failed pull writes no marker, so the next request re-pulls rather than serving a wrong answer.
+
+A dated pull returns delisted listings too (~50,270 codes against ~27,714) because filtering is
+policy and stays with the caller. Intersect a dated set with a live listing set before computing a
+market-wide statistic.
+
+**Cost: 100 units per dated pull**, filed under `/eod-bulk-last-day/US` or `/AU`. A cache hit is
+free.
+
+**Errors:** 400 `unknown-exchange`; 404 `not-pulled`; 422 FastAPI-shaped for an empty or >10-date
+`dates` list, a malformed date, or a `market` outside `US`/`AU`; 502 vendor; 503 vendor/database
+unavailable.
+
+---
+
+## 4c. `POST /screener` — raw vendor rows for one market
+
+```json
+{"country_code": "US",
+ "filters": [["market_capitalization", ">", 300000000], ["refund_5d_p", ">", 5]],
+ "sort": "refund_5d_p.desc", "limit": 50, "offset": 0}
+```
+
+| Field | Default | Notes |
+|---|---|---|
+| `country_code` | **required** | `US` or `AU` |
+| `exchange` | none | optional venue spelling; also decides which venue is sent (see below) |
+| `filters` | `[]` | up to 64 `[field, operator, value]` triples |
+| `sort` | vendor default | `<field>.<asc\|desc>`; the direction is **required** |
+| `limit` | `100` | 1..500 |
+| `offset` | `0` | ≥ 0 |
+
+**The 14 fields** — the only ones the vendor filters and sorts on:
+
+```
+code, name, exchange, sub_exchange, sector, industry, market_capitalization,
+earnings_share, dividend_yield, adjusted_close, avgvol_1d, avgvol_200d,
+refund_1d_p, refund_5d_p
+```
+
+- numeric fields (`market_capitalization`, `earnings_share`, `dividend_yield`, `adjusted_close`,
+  `avgvol_1d`, `avgvol_200d`, `refund_1d_p`, `refund_5d_p`) take `=`, `!=`, `>`, `<`, `>=`, `<=`;
+- text fields (`code`, `name`, `exchange`, `sub_exchange`, `sector`, `industry`) take `=` and `in`
+  only;
+- `in` takes an array and is refused on a numeric field (the vendor answers HTTP 500 for it);
+- **derived fields** (`return_3m_p`, `return_100d_p`, `return_200d_p`) are refused: read closes
+  from `POST /bars/bulk` and compute them there;
+- a **rejected** field (`country`, `pe_ttm`, `refund_1m_p`, `currency_symbol`, …) is refused as not
+  a screener field, with the guidance the vendor's own trap list records;
+- a **GICS-style sector spelling** (`Information Technology`, `Health Care`) is refused with the
+  spelling EODHD holds — otherwise it answers 200 with zero rows.
+
+**The venue travels in `filters`.** The vendor ignores a bare top-level `exchange`, so the service
+lifts every agreeing `exchange` filter and appends exactly one `["exchange", "=", venue]` triple
+last. `<venue>` is, in order: the requested `exchange`; else the single agreeing filter value that
+was lifted; else the resolved market. **The caller's spelling is what travels**, so a per-venue
+`NASDAQ` screen stays per-venue rather than becoming a US-wide one. A venue outside `US`/`AU`
+resolves to another market (`400 exchange-conflict`) or to nothing (`400 unknown-exchange`).
+
+**200 response** — `count` and `rows`, plus the query as sent:
+
+```json
+{"provider": "eodhd", "country_code": "US", "exchange": "US",
+ "filters": [["market_capitalization", ">", 300000000], ["refund_5d_p", ">", 5],
+             ["exchange", "=", "US"]],
+ "sort": "refund_5d_p.desc", "limit": 50, "offset": 0, "count": 50,
+ "rows": [{"code": "AAPL", "exchange": "US", "name": "Apple Inc", "sector": "Technology"}]}
+```
+
+`rows` are the vendor's objects **untouched** — field names, `null`s and columns this service does
+not know pass through. No normalisation, no filtering, no `symbol` added. **An empty result is a
+200 with `count: 0`**: "no company matched" is an answer, not an error.
+
+**No cache.** A screen is a question about now.
+
+**Cost: 5 units flat per call.**
+
+**Errors:** 400 `exchange-conflict`, `mixed-exchanges`, `unknown-exchange`; 422 `unknown-field`,
+`unsupported-operator`, `unsupported-filter`, `derived-field`, `sector-trap`, `invalid-sort`,
+`vendor-rejected` (the vendor refused the query — the caller's mistake, not an outage), or
+FastAPI-shaped for a bad bound or a missing/unknown `country_code`; 502 vendor; 503
+`vendor-unavailable`.
+
+---
+
+## 4d. `POST /profile` — company profile for up to 25 listings
+
+```json
+{"symbols": ["WDS", "BHP", "CBA"], "country_code": "AU", "exchange": "ASX"}
+```
+
+`symbols` is 1..25 (the batch cost bound); `country_code` is required and `exchange` optional,
+resolved exactly as for `POST /bars`, so suffixes and the one-market rule apply.
+
+**200 response**
+
+```json
+{
+  "provider": "eodhd", "country_code": "AU", "exchange": "AU",
+  "requested": 3, "complete": false, "missing": ["CBA"],
+  "profiles": {
+    "WDS": {"symbol": "WDS", "exchange": "AU", "found": true,
+            "name": "Woodside Energy Group Ltd", "sector": "Energy",
+            "industry": "Oil & Gas E&P", "market_cap": 51234567890.0,
+            "currency": "AUD", "country": null, "gic_sector": null,
+            "gic_industry": null, "description": null,
+            "as_of": "2026-11-11", "error": null},
+    "CBA": {"symbol": "CBA", "exchange": "AU", "found": false, "...": "every field null"}
+  }
+}
+```
+
+| Field | Source | When absent |
+|---|---|---|
+| `symbol` | the requested root, upper-cased | never null |
+| `exchange` | the resolved market code (`US`/`AU`), never a venue name | never null |
+| `found` | a vendor row matched on `code` | `false` |
+| `name`, `sector`, `industry` | the vendor row (Yahoo-style sectors, **not GICS**) | null |
+| `market_cap` | `market_capitalization` (absolute USD) | null |
+| `currency` | `currency_symbol`, only when it is exactly three upper-case letters | null |
+| `as_of` | `last_day_data_date` | null |
+| `country`, `gic_sector`, `gic_industry`, `description` | **no entitled source** | always null |
+| `error` | the vendor reason when *this symbol's* call failed | null |
+
+`dividend_yield` is deliberately absent: the vendor reports a fraction where a percentage is
+usually expected, and that is a unit decision for the caller, not a field.
+
+A symbol with no listing is `found: false` and appears in `missing` — **not** an error for the
+batch, and a single failed call is that symbol's `error`, never the batch's. `complete` is true
+when nothing is missing and no entry carries an error.
+
+**Cost: 5 units per uncached symbol** (one pinned vendor call each), so a 25-symbol pass is at
+most 125. Profiles are memoised in-process for 3600 seconds, keyed by symbol and market; a miss and
+a failed call are never memoised. Worst case for a 25-symbol pass is about 300 seconds (five waves
+at concurrency five, each call bounded by 30 s plus one transport retry), so **set a client timeout
+above that** — 330 s or more.
+
+**Errors:** 400 `unknown-exchange`, `exchange-conflict`, `mixed-exchanges`; 422 FastAPI-shaped for
+an empty or over-25 symbol list, or a missing/unknown `country_code`; 503 `vendor-unavailable`.
 
 ---
 
@@ -374,14 +657,14 @@ transport failure, where the request never landed, is free and unrecorded.
 
 ## 6. Provider routing — read this before interpreting `provider`
 
-The router still orders providers per asset class internally, but **no request field selects a
-class**: every symbol-bearing request is treated as `shares`.
+The router orders providers per asset class, and `asset_class` is how a request states one.
+Absent, every symbol is treated as `shares`.
 
-| Internal asset class | Order |
+| Asset class | Order |
 |---|---|
-| `shares` (every HTTP request) | EODHD → Yahoo |
+| `shares` (the default) | EODHD → Yahoo |
 | `indices`, `commodities`, `rates`, `forex` | EODHD → Yahoo |
-| `crypto` (library callers only) | **Binance** → EODHD → Yahoo |
+| `crypto` | **Binance** → EODHD → Yahoo |
 
 Every quote and bar declares the provider that answered. **Two calls for the same symbol can be
 answered by different providers.** That is allowed, but it must be visible: never compute a change
@@ -403,8 +686,11 @@ A provider that cannot serve an asset class is never asked — Binance is never 
    symbol may be bare (`AAPL`) or already-suffixed (`AAPL.US`). A suffix must agree with the
    stated country (`CBA.AU` with `country_code: "AU"` is ASX data; with `US` it is
    `400 exchange-conflict`), and a missing country is a `422` rather than a US default.
-7. **There is no asset-class field.** Every symbol is priced as a share; a crypto pair or an index
-   sent to a symbol endpoint will usually come back `unpriced` rather than from the right tape.
+7. **An asset class must be stated when it is not shares.** `asset_class` is optional and absent
+   means `shares`; an index, commodity ETF proxy or rate sent as a share is a *different
+   instrument*, and the ones whose rendering differs come back `unpriced` (`IXIC.INDX` is not
+   `IXIC.US`). State `indices`, `commodities` or `rates`. A spelling the service does not know is
+   `422 unknown-asset-class` rather than a silent share.
 8. **Whole-market responses are large** (~12,700 rows, ~2 MB). If you only need the top movers, sort
    locally rather than shortening the list — a shorter list can drop below the 100-symbol break-even
    and become *more* expensive.

@@ -305,6 +305,16 @@ mod tests {
         ) -> Result<Vec<Value>, ProviderFailure> {
             Ok(Vec::new())
         }
+
+        async fn screener(
+            &self,
+            _filters: &[Value],
+            _sort: Option<&str>,
+            _limit: i64,
+            _offset: i64,
+        ) -> Result<Value, ProviderFailure> {
+            Ok(Value::Null)
+        }
     }
 
     fn session(days_ago: u64) -> String {

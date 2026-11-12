@@ -35,6 +35,7 @@ pub const PURPOSE_REQUEST_TYPE: &[(&str, &str)] = &[
     ("eod", "/eod/"),
     ("eod_bulk", "/eod-bulk-last-day/US"),
     ("intraday", "/intraday/"),
+    ("screener", "/screener"),
 ];
 
 /// What a call becomes when no tariff row matches it.
@@ -393,6 +394,17 @@ mod tests {
         assert_eq!(tariff().price("/eod/", 0), Some(1));
         assert_eq!(tariff().price("/eod/", 40), Some(1));
         assert_eq!(tariff().price("/intraday/", 40), Some(5));
+    }
+
+    #[test]
+    fn the_screener_purpose_prices_at_five_flat() {
+        assert_eq!(request_type_for("screener"), Some("/screener"));
+        let tariff = tariff();
+        assert_eq!(tariff.price("/screener", 0), Some(5));
+        assert_eq!(tariff.price("/screener", 1), Some(5));
+        // A profile fan-out bills one call per uncached symbol, so the units scale with calls,
+        // not with the batch a single call happens to carry.
+        assert_eq!(tariff.price("/screener", 25), Some(5));
     }
 
     #[test]

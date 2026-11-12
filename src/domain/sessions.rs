@@ -65,6 +65,18 @@ fn exchange_close(market: &str) -> Option<(Tz, NaiveTime)> {
     Some((zone, close))
 }
 
+/// The IANA zone an exchange's sessions are dated in, or `None` when it has no known close.
+///
+/// Read from the same table [`latest_completed_session`] reads, so a session's date and its
+/// bars' own local timestamps can never be computed against two different zones. A market with
+/// no entry is `None`, which the caller treats as UTC: an intraday bar group keyed by UTC is
+/// less wrong than one keyed by a guessed zone.
+pub fn exchange_timezone(market: &str) -> Option<Tz> {
+    let key = market.trim().to_uppercase();
+    let (_, zone_name, _) = EXCHANGE_CLOSE.iter().find(|(code, _, _)| *code == key)?;
+    zone_name.parse().ok()
+}
+
 /// The newest session date that has finished and settled at `market`.
 ///
 /// A session dated *D* counts once the exchange's clock has reached close + [`SETTLEMENT_HOURS`]
@@ -193,6 +205,21 @@ mod tests {
             latest_completed_session(Some("ZZ"), utc(2026, 10, 29, 9)),
             NaiveDate::from_ymd_opt(2026, 10, 28).unwrap()
         );
+    }
+
+    #[test]
+    fn the_session_zone_is_the_one_the_completion_rule_reads() {
+        assert_eq!(exchange_timezone("us").unwrap(), "America/New_York".parse::<Tz>().unwrap());
+        assert_eq!(
+            exchange_timezone(" AU ").unwrap(),
+            "Australia/Sydney".parse::<Tz>().unwrap()
+        );
+        assert_eq!(exchange_timezone("CRYPTO"), None);
+        assert_eq!(exchange_timezone(""), None);
+        // Every market with a close rule has a zone that parses.
+        for (code, _, _) in EXCHANGE_CLOSE {
+            assert!(exchange_timezone(code).is_some(), "{code}");
+        }
     }
 
     #[test]

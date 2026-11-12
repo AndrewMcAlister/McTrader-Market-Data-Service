@@ -26,6 +26,32 @@ Why this matters concretely: a 300-second TTL here and a 300-second TTL there do
 together. The first request after a restart gets one answer from each, and a stop computed from a
 stale price is indistinguishable from a stop computed from a fresh one.
 
+### The EODHD legs that move to this service
+
+Once these four routes are wired, McTrader holds no EODHD key and reaches no EODHD host. The
+capability each route carries, and the leg in McTrader that it retires:
+
+| Capability | mMds route | McTrader leg deleted |
+|---|---|---|
+| Intraday 5m/15m/30m/1h/4h bars | `POST /bars/intraday` | `EODHDClient.get_historical_bars` + `_aggregate_by_count` |
+| Whole-market closes for several sessions | `POST /bars/bulk` | `EODHDClient.get_eod_bulk_last_day`, the direct REST pull in `EODHDBulkCloseService` |
+| Raw screener rows | `POST /screener` | `EODHDClient.get_screener`, the tracked-query REST leg in `mc_trader_controller`, the hosted MCP screener tools |
+| Company profile | `POST /profile` | `EODHDClient.get_screener_profile` (and the `get_fundamentals` call that answers 403) |
+| An index/commodity/rate price, bar or ATR | optional `asset_class` on `/price`, `/prices`, `/atr`, `/bars` | the market picture's share-folding workaround |
+
+Rules that come with them, and that the adapter must honour:
+
+- **One request is one market.** `country_code` is required on every symbol route; `POST /bars/bulk`
+  names `market` instead. A body naming two markets is refused, never half-served.
+- **Send `X-MarketData-Caller: mctrader`.** All four routes bill through the ledger under it, so
+  "the screener spend moved" is a row you can read rather than a claim.
+- **`POST /profile` caps at 25 symbols** and memoises for an hour in-process. A 25-symbol pass is at
+  most 125 units cold and free inside the hour; its worst-case latency is about 300 s.
+- **`/screener` is 5 units flat per call.** There is no cache: a screen is a question about now.
+- **`/bars/intraday` is 5 units per fetched symbol**, free inside `MDS_INTRADAY_TTL_SECONDS` (300).
+  Use `allow_fetch: false` wherever a cached answer is enough — a refetch storm is the largest
+  tariff risk in this estate.
+
 ---
 
 ## 2. The adapter
@@ -127,6 +153,69 @@ Answers with `as_of_session`, `sessions`, `adjusted`, `provider`, `rows[]`.
 **The session in progress is already excluded.** Do not filter it again downstream; filtering twice
 is harmless but it hides the fact that the guarantee lives in the service.
 
+### `POST /bars/intraday`
+
+```json
+{ "symbols": ["TTD"], "country_code": "US", "timeframe": "4Hour", "limit": 48, "allow_fetch": true }
+```
+
+Answers in `POST /bars`'s series shape, so one decoder serves both. `timeframe` is `5Min`,
+`15Min`, `30Min`, `1Hour` or `4Hour` (aliases `5m`…`4h`); `limit` defaults to 78 buckets.
+`fetched` names the symbols that cost 5 units each; a cache hit inside 300 s costs nothing.
+
+Two differences worth wiring deliberately: **`d` is an exchange-local ISO timestamp, not a session
+date** (an intraday bar is a moment), and **`adjusted` is always `false`** with `cr: null`,
+because the vendor's intraday tape is unadjusted. The buckets are anchored to the session's first
+bar, so a 4H bar cannot straddle the overnight gap and is stable across requests — this is a
+deliberate correction of the current `_aggregate_by_count`, which chunks from `now - window_days`
+and therefore changes shape as the clock advances.
+
+### `POST /bars/bulk`
+
+```json
+{ "market": "US", "dates": ["latest", "2026-08-13"], "allow_fetch": true }
+```
+
+Whole-market closes for one to ten sessions. `c` is the **adjusted** close. `"latest"` resolves
+through the same completed-session rule `/bars` uses. A session is served from the cache only when
+a completed pull is recorded for it; a pull far below the previous session's row count comes back
+with its key in `partial` and is never served as complete afterwards. `allow_fetch: false` on an
+unmarked session is `404 not-pulled`. Cost: 100 units per dated pull, free on a marked session.
+
+Dated pulls include delisted listings (~50,270 codes against ~27,714), so intersect a dated set
+with the live listing set before computing a market-wide statistic — the trap the local
+`ReturnWindowService` already handles.
+
+### `POST /screener`
+
+```json
+{ "country_code": "US",
+  "filters": [["market_capitalization", ">", 300000000], ["refund_5d_p", ">", 5]],
+  "sort": "refund_5d_p.desc", "limit": 50 }
+```
+
+Raw vendor rows for one market, **untouched**: no normalisation, no filtering, no `symbol` added.
+An empty result is a 200 with `count: 0`. `filters` are validated against the vendor's 14 fields
+before a unit is spent, so a typo is a local 422 rather than a vendor round-trip.
+
+The venue travels inside `filters`: the service lifts any agreeing `exchange` filter and appends
+exactly one `["exchange", "=", venue]` triple, **using the caller's spelling**, so a per-venue
+`NASDAQ` screen stays per-venue rather than becoming a US-wide one. Keep the venue resolution
+policy on your side — the service refuses a contradiction but does not choose a venue for you.
+Cost: 5 units flat.
+
+### `POST /profile`
+
+```json
+{ "symbols": ["WDS", "BHP", "CBA"], "country_code": "AU", "exchange": "ASX" }
+```
+
+Up to 25 listings. 5 units per **uncached** symbol, memoised in-process for an hour. A symbol with
+no listing is `found: false` and appears in `missing`; a single failed call is that symbol's
+`error`, never the batch's. `country`, `gic_sector`, `gic_industry` and `description` have no
+entitled source and are always `null`. Worst case for a 25-symbol pass is about 300 s, so the
+client timeout must exceed it (330 s is safe).
+
 ---
 
 ## 5. Error handling
@@ -160,8 +249,11 @@ seconds returns immediately instead of hanging. Treat it as retryable rather tha
    market, ~2 MB). If McTrader only needs the top N movers, sort locally rather than asking for a
    narrower list — a narrower list may drop below the 100-symbol break-even and become *more*
    expensive.
-5. **There is no asset-class field.** The vendor taxonomy was not reliable, so every symbol is
-   priced as a share; crypto and indices are not selectable over this API.
+5. **`asset_class` is optional and absent means shares.** State it for an index, commodity ETF
+   proxy or rate: `indices`, `commodities`, `rates`, `forex`, `crypto` (plus the aliases the
+   service lists). An index priced as a share is a *different instrument* and usually comes back
+   `404 unpriced`; a spelling the service does not know is `422 unknown-asset-class` rather than a
+   silent share.
 6. **A country code is mandatory.** `CBA`, `BHP`, `BXB` are ASX tickers *and* US ones. Pass
    `country_code` (`US` or `AU`) on every symbol-bearing call; omitting it is a 422, not a US
    default. A suffix (`CBA.AU`) corroborates the country but does not replace it. A
@@ -179,6 +271,9 @@ seconds returns immediately instead of hanging. Treat it as retryable rather tha
 - [ ] `BulkPriceRoute` retired
 - [ ] `ATR_STOP_MULTIPLIER` read from broker config and passed explicitly
 - [ ] 503 `database-busy` treated as retryable
+- [ ] Intraday, bulk-close, screener and profile calls re-pointed at the four new routes
+- [ ] The EODHD key removed from McTrader's environment and keyring; no EODHD host reachable
+- [ ] `asset_class` sent for the market picture's indices, commodity proxies and the rate
 - [ ] Kill switch: `D:\market-data\NO-MKTDATA` present → direct vendor (per the `NO-BULK` precedent,
       which treats an *unreadable* switch as "off")
 - [ ] Verified: a McTrader cycle prices and stops with `:8003` stopped and the kill switch set

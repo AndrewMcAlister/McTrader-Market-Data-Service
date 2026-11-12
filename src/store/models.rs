@@ -101,6 +101,40 @@ pub struct WarehouseSession {
     pub volume: Option<i64>,
 }
 
+/// A native 5-minute bar as `IntradayBar5Min` returns it.
+///
+/// `ts_utc` is the bar's opening instant. `adjusted` is stored rather than assumed so a future
+/// adjusted source cannot silently mix scales inside one series.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredIntradayBar {
+    pub symbol: String,
+    pub exchange: String,
+    pub ts_utc: NaiveDateTime,
+    pub open: Option<f64>,
+    pub high: Option<f64>,
+    pub low: Option<f64>,
+    pub close: Option<f64>,
+    pub volume: Option<i64>,
+    pub adjusted: bool,
+    pub fetched_at: Option<NaiveDateTime>,
+}
+
+/// One native 5-minute bar to upsert.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IntradayBarWrite {
+    pub symbol: String,
+    /// Optional only so the store can refuse it explicitly, as the price and daily writers do.
+    pub exchange: Option<String>,
+    pub ts_utc: NaiveDateTime,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: i64,
+    pub adjusted: bool,
+}
+
+
 /// One cached indicator row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StoredIndicator {

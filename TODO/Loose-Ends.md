@@ -6,6 +6,23 @@ Resolved items are removed rather than kept as history — the tests are the rec
 
 ********************************
 
+## Security — a literal EODHD API key sat in McTrader's test files
+
+`D:/McTrader/tests/test_analysis_screener_live.py` and the Postman `EODHD` collection held a
+literal EODHD API key. The value is deliberately not reproduced here.
+
+**The fix is an operator step, outside HTTP:** delete both files and rotate the key in the EODHD
+account. Rotation means editing the service account's `market_data:eodhd:global` /
+`eodhd:api_key` entry in Windows Credential Manager and restarting the service —
+`POST /secrets/eodhd` is set-once and refuses with 409 `key-already-set`, so it cannot replace a
+key. No keyring re-point is needed once McTrader loses the key entirely, which the egress work
+above is for.
+
+**Status:** owed. Until both files are deleted, the key is in the working tree and in whatever
+history and backups contain them.
+
+********************************
+
 ## Phase 4 — `test_refresh.py::test_broken_calendar_does_not_crash_the_refresh`
 
 **Source case:** the Python refresh caught an exception from `latest_completed_session` and
@@ -91,3 +108,45 @@ Do not call `/refresh` with `force=true` (100 units) without approval.
 **Consequence:** the test suite is green and the service is live under NSSM, but the bulk write
 jobs are verification debt, not a code gap. They must be proven on a copy before they are run
 against production.
+
+********************************
+
+## EODHD egress — probes P1–P8 are still owed
+
+The four egress routes (`/bars/intraday`, `/bars/bulk`, `/screener`, `/profile`) and the optional
+`asset_class` field are implemented and tested, but the plan's eight live probes have not run:
+they need `Market_Data` and, for P6, the deployed binary. None of them is a code change.
+
+| # | What | Expected / what it decides |
+|---|---|---|
+| P1 | `SELECT RequestType, CostBasis, CostEach FROM dbo.RequestTypes WHERE RequestType IN (N'/screener', N'/intraday/', N'/eod-bulk-last-day/US', N'/eod-bulk-last-day/AU')` | one row each: `/screener` 5 `flat`, `/intraday/` 5 `per_call`, both bulk rows 100 `flat`. The guarded INSERT seeds `/screener` and leaves a different existing row alone; if the live row disagrees with the literal 5, the row wins |
+| P2 | one `/screener` call with `[["code","in",["WDS","BHP"]],["exchange","=","AU"]]` (5 units) | two rows — which would make a batched `/profile` safe; until then the per-symbol fan-out is final |
+| P3 | one `/screener` call pinned to `code`/`exchange` for `WDS` | records `currency_symbol`'s live value form; the three-uppercase-letter rule holds either way |
+| P4 | `SELECT COUNT(*), MAX(BarTimeUtc) FROM dbo.Bar5Min` and `BarHourly` | expected stale (newest ~2026-10-30 / ~2026-10-14), confirming §5.2's refusal to read the estate tape |
+| P5 | two `/bars/bulk` calls for the same date | the second is `provider: "cache"` and the ledger is unchanged; a two-date miss costs 200 |
+| P6 | each new route against the live service on a temporary `MDS_PORT` | the INTERFACE.md example shapes, `provider` correct |
+| P7 | grep every live broker row, watchlist and stored `Screener_Settings` for a venue outside US/AU | none. If one exists, the US/AU scope decision has to be reopened before `/screener` is relied on |
+| P8 | `SELECT COUNT(*) FROM dbo.DailySnapshot WHERE SnapshotDate = <latest session>` | records how partial the latest session is, which is the evidence the `BulkSnapshotPull` marker exists for |
+
+**Also owed before S1/S2 go live:** a `Market_Data` backup, because both slices add a table. The
+DDL is guarded and idempotent, and the previous binary runs against the new schema unchanged.
+
+**Deployment itself is an operator step, not a coding one:** stop/start the NSSM service **with
+elevation** (it keeps the old binary otherwise), after proving the build on a temporary `MDS_PORT`
+with `run.ps1`. Rollback is `git revert` + rebuild + an elevated restart; the two new tables are
+left in place and are harmless.
+
+********************************
+
+## EODHD egress — the profile memo cap is not exercised to its bound
+
+`PROFILE_CACHE_MAX_ENTRIES` (4096) and its one-time warning are implemented in
+`Products::remember_profiles`, and the guard is catalogued as G-18. The test suite pins the TTL,
+the miss-not-cached rule, the dedupe and the per-symbol failure isolation, but **no test drives
+the memo to its cap**: doing so needs 4,097 distinct symbols and about 20,000 units of simulated
+spend.
+
+**Deferred coding:** if the cap ever matters in practice, make it a `Settings` value
+(`MDS_PROFILE_CACHE_MAX_ENTRIES`) and test it at a small bound. The rest of the guard — prune on
+insert, never memoise a miss, never memoise a failure — is already pinned.
+

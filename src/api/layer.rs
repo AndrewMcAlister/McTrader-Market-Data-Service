@@ -16,12 +16,14 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde_json::Value;
 
 use crate::collector::CollectionProducts;
 use crate::config::Settings;
 use crate::products::{
-    AtrBatchResponse, AtrRequest, BarsResponse, ProductError, Products, ProductsStore,
-    QuotePayload, StatsResponse,
+    AtrBatchResponse, AtrRequest, BarsResponse, BulkDateKey, BulkResponse, IntradayRequest,
+    IntradayResponse, ProductError, ProfileBatch, ProfilesResponse, Products, ProductsStore,
+    QuotePayload, ScreenerResponse, StatsResponse,
 };
 
 /// The product operations the HTTP surface exposes.
@@ -47,6 +49,27 @@ pub trait ProductLayer: CollectionProducts {
     ) -> Result<BarsResponse, ProductError>;
 
     async fn atr_batch(&self, request: AtrRequest<'_>) -> Result<AtrBatchResponse, ProductError>;
+
+    async fn screener(
+        &self,
+        country_code: &str,
+        exchange: Option<&str>,
+        filters: &[Value],
+        sort: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<ScreenerResponse, ProductError>;
+
+    async fn profiles(&self, request: ProfileBatch<'_>) -> Result<ProfilesResponse, ProductError>;
+
+    async fn intraday(&self, request: IntradayRequest<'_>) -> Result<IntradayResponse, ProductError>;
+
+    async fn bulk_closes(
+        &self,
+        market: &str,
+        dates: &[BulkDateKey],
+        allow_fetch: bool,
+    ) -> Result<BulkResponse, ProductError>;
 
     async fn stats(&self) -> StatsResponse;
 }
@@ -95,6 +118,38 @@ impl ProductLayer for Products {
 
     async fn atr_batch(&self, request: AtrRequest<'_>) -> Result<AtrBatchResponse, ProductError> {
         Products::atr_batch(self, request).await
+    }
+
+    async fn screener(
+        &self,
+        country_code: &str,
+        exchange: Option<&str>,
+        filters: &[Value],
+        sort: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<ScreenerResponse, ProductError> {
+        Products::screener(self, country_code, exchange, filters, sort, limit, offset).await
+    }
+
+    async fn profiles(&self, request: ProfileBatch<'_>) -> Result<ProfilesResponse, ProductError> {
+        Products::profiles(self, request).await
+    }
+
+    async fn intraday(
+        &self,
+        request: IntradayRequest<'_>,
+    ) -> Result<IntradayResponse, ProductError> {
+        Products::intraday(self, request).await
+    }
+
+    async fn bulk_closes(
+        &self,
+        market: &str,
+        dates: &[BulkDateKey],
+        allow_fetch: bool,
+    ) -> Result<BulkResponse, ProductError> {
+        Products::bulk_closes(self, market, dates, allow_fetch).await
     }
 
     async fn stats(&self) -> StatsResponse {

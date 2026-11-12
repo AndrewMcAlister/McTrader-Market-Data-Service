@@ -8,5 +8,7 @@ pub mod asset_class;
 pub mod atr;
 pub mod availability;
 pub mod exchanges;
+pub mod intraday;
+pub mod screener;
 pub mod sessions;
 pub mod symbols;

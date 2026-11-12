@@ -117,6 +117,9 @@ impl From<ProductError> for ApiError {
             ProductError::Refused(error) => error.into(),
             ProductError::Store(error) => Self::store(&error),
             ProductError::Provider(error) => error.into(),
+            // No vendor client in this process: a keyless build still serves Yahoo and
+            // Binance, so this is a per-route 503 rather than a startup failure.
+            ProductError::Unavailable => Self::vendor_unavailable(),
         }
     }
 }

@@ -62,9 +62,14 @@ pub fn is_exchange_alias(code: &str) -> bool {
 }
 
 /// The vendor aliases the estate actually types.
+///
+/// `BATS`, `ARCA` and `IEX` are named here because a caller's own venue vocabulary does
+/// (`services/watchlist_service.py` sends BATS), and refusing a legitimate venue would be a
+/// regression. They resolve to the US *market*; which spelling travels to the vendor is the
+/// caller's decision, and `/screener` appends the caller's value rather than this one.
 fn exchange_alias(key: &str) -> Option<&'static str> {
     Some(match key {
-        "US" | "NYSE" | "NASDAQ" | "AMEX" | "NYSEARCA" => "US",
+        "US" | "NYSE" | "NASDAQ" | "AMEX" | "NYSEARCA" | "ARCA" | "BATS" | "IEX" => "US",
         "AU" | "ASX" | "AX" | "AUS" => "AU",
         "L" | "LSE" | "UK" | "GB" | "LON" => "L",
         "TO" | "TSX" | "CA" => "TO",
@@ -255,6 +260,18 @@ mod tests {
         assert_eq!(exchange_for("ASX").unwrap(), "AU");
         assert_eq!(exchange_for("uk").unwrap(), "L");
         assert_eq!(exchange_for("NYSE").unwrap(), "US");
+    }
+
+    #[test]
+    fn the_us_venue_vocabulary_resolves_to_the_us_market() {
+        // McTrader's per-venue US loop and its watchlist service name these; a screener that
+        // refused BATS would be refusing a live caller's ordinary request.
+        for venue in ["US", "NASDAQ", "NYSE", "AMEX", "NYSEARCA", "ARCA", "BATS", "IEX"] {
+            assert_eq!(exchange_for(venue).unwrap(), "US", "{venue}");
+        }
+        for venue in ["AU", "ASX", "AX", "AUS"] {
+            assert_eq!(exchange_for(venue).unwrap(), "AU", "{venue}");
+        }
     }
 
     #[test]

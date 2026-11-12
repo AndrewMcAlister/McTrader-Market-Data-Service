@@ -365,6 +365,14 @@ mod tests {
         ) -> Result<Vec<SeriesKey>, StoreError> {
             Ok(Vec::new())
         }
+
+        async fn session_closes(
+            &self,
+            _exchange: &str,
+            _session: NaiveDate,
+        ) -> Result<std::collections::BTreeMap<String, f64>, StoreError> {
+            unimplemented!("the backfill never reads a session's closes")
+        }
     }
 
     #[test]

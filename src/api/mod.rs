@@ -4,8 +4,8 @@
 //!
 //! * [`router`] wires methods and paths, and catches the two framework-shaped refusals the
 //!   source service answered itself (404, 405);
-//! * the handler modules ([`data`], [`ops`], [`secrets`], [`market`], [`todays`], [`refresh`])
-//!   read the request, name the caller and delegate;
+//! * the handler modules ([`data`], [`ops`], [`secrets`], [`market`], [`todays`], [`refresh`],
+//!   [`screener`]) read the request, name the caller and delegate;
 //! * [`state`] is the one shared object every handler receives;
 //! * [`dto`], [`errors`] and [`reference`] are the contract's vocabulary — request shapes,
 //!   refusal bodies and the two time conventions;
@@ -25,6 +25,7 @@ pub mod reference;
 pub mod refresh;
 pub mod request;
 pub mod router;
+pub mod screener;
 pub mod secrets;
 pub mod state;
 pub mod todays;

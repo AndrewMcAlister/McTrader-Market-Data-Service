@@ -25,31 +25,41 @@
 //! a long list *is* the whole-market call.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, NaiveDate, NaiveDateTime};
+use chrono_tz::Tz;
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::clock::{iso_naive, now_naive, seconds_between, Clock};
 use crate::config::Settings;
 use crate::domain::asset_class::AssetClass;
 use crate::domain::atr;
-use crate::domain::exchanges::resolve_exchange;
-use crate::domain::sessions::latest_completed_session;
+use crate::domain::availability::COUNTRIES;
+use crate::domain::exchanges::{exchange_for, resolve_exchange};
+use crate::domain::intraday::{aggregate, IntradayRow, Timeframe};
+use crate::domain::screener::{
+    parse_sort, profile_filters, screener_wire_filters, PROFILE_QUERY_LIMIT,
+};
+use crate::domain::sessions::{exchange_timezone, latest_completed_session};
+use crate::domain::symbols::{symbol_for_provider, ProviderId};
 use crate::error::{py_repr, MarketDataError, ProviderFailure};
 use crate::presence::Presence;
-use crate::providers::base::{ProviderBar, ProviderQuote};
+use crate::providers::base::{number, ProviderBar, ProviderQuote};
 use crate::providers::eodhd_client::{bare_symbol, EodhdClient, EodhdStats};
 use crate::providers::router::{ProviderRouter, RouterStats};
 use crate::refresh::RefreshStore;
 use crate::store::models::{
-    CachedPrice, DailyBarWrite, IndicatorWrite, PriceRow, StoredBar, StoredIndicator,
+    CachedPrice, DailyBarWrite, IndicatorWrite, IntradayBarWrite, PriceRow, StoredBar,
+    StoredIndicator, StoredIntradayBar,
 };
 use crate::store::{
-    DailyBarRepository, IndicatorRepository, PriceRepository, StoreError, UsageRepository,
+    BulkPullRepository, DailyBarRepository, IndicatorRepository, IntradayRepository,
+    PriceRepository, StoreError, UsageRepository,
 };
-use crate::usage::{StoreUsageLedger, Tariff};
+use crate::usage::{current_caller, with_caller, StoreUsageLedger, Tariff};
 
 /// How old a whole-market row may be before it is dropped as a price that no longer exists.
 /// Four days: the feed carries delisted symbols holding their last-ever price, and a row from
@@ -66,6 +76,35 @@ pub const BULK_SNAPSHOT_TTL_SECONDS: f64 = 120.0;
 /// of a day the exchange does not trade — one call per symbol per hour — while still catching the
 /// publication an hour after it happens.
 pub const BARS_REFRESH_TTL_SECONDS: f64 = 3600.0;
+
+/// How long a profile is trusted before its vendor call is paid for again.
+///
+/// One hour is the cadence a company's description actually changes on; market capitalisation
+/// moves with the price, and the memo is what makes a 25-symbol batch cost 125 units once
+/// rather than on every pass.
+pub const PROFILE_TTL_SECONDS: f64 = 3600.0;
+
+/// How many profiles the in-process memo holds. About 1.5 MB at the shape below.
+///
+/// At the cap a fresh entry is returned but not memoised, with one warning: an unbounded memo
+/// is a memory leak with a cache's name.
+pub const PROFILE_CACHE_MAX_ENTRIES: usize = 4096;
+
+/// How many profile vendor calls run at once. The client is `Send + Sync` and its methods take
+/// `&self`, so the fan-out is real concurrency over one client.
+///
+/// Worst case at 25 symbols is five waves of at most `2 × 30 s + 0.5 s` (the 30-second
+/// `eodhd_timeout_seconds` and the one transport retry inside `get_json`), about 300 s. That
+/// bound is part of the contract: a caller's client timeout must exceed it.
+pub const PROFILE_CONCURRENCY: usize = 5;
+
+/// The row-count floor, as a fraction of the previous completed session's, below which a bulk
+/// pull is treated as partial.
+///
+/// The live evidence is 1,881 rows in `DailySnapshot` against the ~27,714 a completed pull
+/// writes — 7%, not 90% — so a half separates a partial write from a quiet session with room to
+/// spare. A first pull has no baseline and is trusted; a pull of nothing is never complete.
+pub const BULK_MIN_COMPLETENESS_RATIO: f64 = 0.5;
 
 /// Calendar days a session depth spans, for counting how much history a symbol holds: seven
 /// for five is the weekend, and forty days of margin covers the holidays in between.
@@ -168,12 +207,24 @@ pub fn indicator_answers(
 /// without a second handle: the API's `/refresh` and the scheduler operate on exactly the
 /// store the products read.
 pub trait ProductsStore:
-    PriceRepository + RefreshStore + DailyBarRepository + IndicatorRepository + UsageRepository
+    PriceRepository
+    + RefreshStore
+    + DailyBarRepository
+    + IndicatorRepository
+    + UsageRepository
+    + IntradayRepository
+    + BulkPullRepository
 {
 }
 
 impl<T: ?Sized> ProductsStore for T where
-    T: PriceRepository + RefreshStore + DailyBarRepository + IndicatorRepository + UsageRepository
+    T: PriceRepository
+        + RefreshStore
+        + DailyBarRepository
+        + IndicatorRepository
+        + UsageRepository
+        + IntradayRepository
+        + BulkPullRepository
 {
 }
 
@@ -184,6 +235,11 @@ pub enum ProductError {
     Refused(MarketDataError),
     Store(StoreError),
     Provider(ProviderFailure),
+    /// The capability needs the vendor, and this process has no vendor client.
+    ///
+    /// A keyless build still serves Yahoo and Binance, so a missing client is not a startup
+    /// failure; it is a 503 `vendor-unavailable` on exactly the routes that cannot answer.
+    Unavailable,
 }
 
 impl std::fmt::Display for ProductError {
@@ -192,6 +248,7 @@ impl std::fmt::Display for ProductError {
             Self::Refused(error) => std::fmt::Display::fmt(error, formatter),
             Self::Store(error) => write!(formatter, "database error: {error}"),
             Self::Provider(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Unavailable => formatter.write_str("no EODHD client is configured"),
         }
     }
 }
@@ -347,6 +404,141 @@ pub struct AtrBatchResponse {
     pub complete: bool,
 }
 
+/// What `POST /screener` returns: the vendor's rows, untouched, and the query that produced
+/// them.
+///
+/// `filters` echoes the wire form, including the single `["exchange", "=", venue]` triple the
+/// service appended, so a caller can see which venue actually ran. Nothing is normalised out of
+/// `rows`: field names, nulls and columns this service does not know travel through.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ScreenerResponse {
+    pub provider: String,
+    pub country_code: String,
+    pub exchange: String,
+    pub filters: Vec<Value>,
+    pub sort: Option<String>,
+    pub limit: i64,
+    pub offset: i64,
+    pub count: usize,
+    pub rows: Vec<Value>,
+}
+
+/// One company profile, as `/screener` can answer it.
+///
+/// The fields with no entitled source (`country`, `gic_sector`, `gic_industry`,
+/// `description`) are always null rather than absent: a caller comparing two profiles needs the
+/// same keys every time. `error` is set only when this symbol's own vendor call failed, which
+/// is not an error for the batch.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProfileEntry {
+    pub symbol: String,
+    pub exchange: String,
+    pub found: bool,
+    pub name: Option<String>,
+    pub sector: Option<String>,
+    pub industry: Option<String>,
+    pub market_cap: Option<f64>,
+    pub currency: Option<String>,
+    pub country: Option<String>,
+    pub gic_sector: Option<String>,
+    pub gic_industry: Option<String>,
+    pub description: Option<String>,
+    pub as_of: Option<String>,
+    pub error: Option<String>,
+}
+
+/// The batch shape `POST /profile` returns.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ProfilesResponse {
+    pub provider: String,
+    pub country_code: String,
+    pub exchange: String,
+    pub requested: usize,
+    pub complete: bool,
+    pub missing: Vec<String>,
+    pub profiles: BTreeMap<String, ProfileEntry>,
+}
+
+/// The caller-supplied half of a profile request.
+#[derive(Debug, Clone)]
+pub struct ProfileBatch<'a> {
+    pub symbols: &'a [String],
+    pub exchange: Option<&'a str>,
+    pub country_code: Option<&'a str>,
+}
+
+/// The batch shape `POST /bars/intraday` returns.
+///
+/// The series shape is `POST /bars`'s, unchanged, so a caller can reuse one decoder. The one
+/// difference is stated: a row's `d` is an exchange-local ISO timestamp, because an intraday bar
+/// is a moment rather than a session.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct IntradayResponse {
+    pub exchange: String,
+    pub provider: String,
+    pub fetched: Vec<String>,
+    pub short_history: Vec<String>,
+    pub bars: BTreeMap<String, BarsEntry>,
+}
+
+/// The caller-supplied half of an intraday request.
+#[derive(Debug, Clone)]
+pub struct IntradayRequest<'a> {
+    pub symbols: &'a [String],
+    pub timeframe: Timeframe,
+    pub limit: i64,
+    pub allow_fetch: bool,
+    pub exchange: Option<&'a str>,
+    pub country_code: Option<&'a str>,
+}
+
+/// One requested bulk date.
+///
+/// `Latest` is resolved through the same [`latest_completed_session`] rule `/bars` uses, so the
+/// two routes cannot disagree about which session has finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BulkDateKey {
+    Latest,
+    Session(NaiveDate),
+}
+
+impl BulkDateKey {
+    /// The key as the caller spelled it, which is the key the response is filed under.
+    pub fn as_requested(self) -> String {
+        match self {
+            Self::Latest => "latest".to_string(),
+            Self::Session(date) => date.to_string(),
+        }
+    }
+}
+
+/// One symbol's close in a bulk answer. The short key is `/bars`'s contract shape.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BulkClose {
+    pub c: f64,
+}
+
+/// One session in a bulk answer: the session the service resolved, and every symbol's close.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BulkSession {
+    pub session: String,
+    pub rows: BTreeMap<String, BulkClose>,
+}
+
+/// The shape `POST /bars/bulk` returns.
+///
+/// `partial` names the requested date keys whose rows came from a pull without a completeness
+/// marker. It is the only way an unmarked session is ever returned, and only on the response of
+/// the pull that produced it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BulkResponse {
+    pub market: String,
+    pub provider: String,
+    pub partial: Vec<String>,
+    pub dates: BTreeMap<String, BulkSession>,
+}
+
+
 /// The caller-supplied half of an ATR request.
 #[derive(Debug, Clone)]
 pub struct AtrRequest<'a> {
@@ -392,6 +584,12 @@ pub struct CountersSnapshot {
     pub atr_computed: u64,
     pub bulk_snapshot_fetches: u64,
     pub per_symbol_fetches: u64,
+    pub intraday_fetches: u64,
+    pub intraday_cache_hits: u64,
+    pub screener_calls: u64,
+    pub profile_calls: u64,
+    pub profile_memo_hits: u64,
+    pub bulk_pulls: u64,
 }
 
 /// The whole-market snapshot's state, for `/stats`.
@@ -436,6 +634,12 @@ struct Counters {
     atr_computed: AtomicU64,
     bulk_snapshot_fetches: AtomicU64,
     per_symbol_fetches: AtomicU64,
+    intraday_fetches: AtomicU64,
+    intraday_cache_hits: AtomicU64,
+    screener_calls: AtomicU64,
+    profile_calls: AtomicU64,
+    profile_memo_hits: AtomicU64,
+    bulk_pulls: AtomicU64,
 }
 
 impl Counters {
@@ -450,6 +654,12 @@ impl Counters {
             atr_computed: load(&self.atr_computed),
             bulk_snapshot_fetches: load(&self.bulk_snapshot_fetches),
             per_symbol_fetches: load(&self.per_symbol_fetches),
+            intraday_fetches: load(&self.intraday_fetches),
+            intraday_cache_hits: load(&self.intraday_cache_hits),
+            screener_calls: load(&self.screener_calls),
+            profile_calls: load(&self.profile_calls),
+            profile_memo_hits: load(&self.profile_memo_hits),
+            bulk_pulls: load(&self.bulk_pulls),
         }
     }
 }
@@ -507,6 +717,13 @@ impl From<&DailyBarWrite> for BarView {
     }
 }
 
+/// A profile memo entry: the answer and when it was paid for.
+#[derive(Debug, Clone)]
+struct ProfileMemoEntry {
+    entry: ProfileEntry,
+    stored_at: NaiveDateTime,
+}
+
 /// Price, prices, bars and ATR over one vendor client, one store and three caches.
 pub struct Products {
     settings: Settings,
@@ -520,6 +737,11 @@ pub struct Products {
     bars_refreshed: Mutex<HashMap<(String, String), (NaiveDate, NaiveDateTime)>>,
     /// `(market, symbol) -> how many sessions the last deep vendor pull returned`.
     bars_deep: Mutex<HashMap<(String, String), usize>>,
+    /// `(root, market) -> the profile and when it was fetched`. No table: §5.4 of the plan
+    /// records why a persistent cache was rejected for a value whose cold refill is capped.
+    profiles: Mutex<HashMap<(String, String), ProfileMemoEntry>>,
+    /// Set once, when the memo is full and an entry could not be kept.
+    profile_cap_warned: AtomicBool,
     counters: Counters,
 }
 
@@ -586,6 +808,8 @@ impl Products {
             bulk: tokio::sync::Mutex::new(BulkState::default()),
             bars_refreshed: Mutex::new(HashMap::new()),
             bars_deep: Mutex::new(HashMap::new()),
+            profiles: Mutex::new(HashMap::new()),
+            profile_cap_warned: AtomicBool::new(false),
             counters: Counters::default(),
         })
     }
@@ -1375,6 +1599,540 @@ impl Products {
         })
     }
 
+    /// One screen: the vendor's rows for one market, untouched.
+    ///
+    /// The policy that decides which filters to send stays with the caller. What happens here is
+    /// transport: resolve the one market, validate the filters against the vendor's vocabulary,
+    /// lift every `exchange` filter into the single triple the vendor needs, and make the call.
+    ///
+    /// A vendor 4xx caused by the query is the caller's mistake and answers 422
+    /// `vendor-rejected`; every other provider failure stays a 502. A bad filter must never read
+    /// as a vendor outage.
+    pub async fn screener(
+        &self,
+        country_code: &str,
+        exchange: Option<&str>,
+        filters: &[Value],
+        sort: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<ScreenerResponse, ProductError> {
+        let market = resolve_exchange(exchange, Some(country_code), &[], None)?;
+        require_supported_market(&market)?;
+        crate::domain::screener::validate_filters(filters)?;
+        let wire = screener_wire_filters(filters, exchange, &market)?;
+        let sort = parse_sort(sort)?;
+
+        let client = self.client.as_ref().ok_or(ProductError::Unavailable)?;
+        let body = client
+            .screener(&wire, sort.as_deref(), limit, offset)
+            .await
+            .map_err(provider_refusal)?;
+        let rows = screener_rows(body)?;
+        self.counters.screener_calls.fetch_add(1, Ordering::Relaxed);
+        tracing::info!(
+            "screener: market {market}, venue {:?}, {} row(s), limit {limit}, offset {offset}",
+            wire.last(),
+            rows.len()
+        );
+
+        Ok(ScreenerResponse {
+            provider: "eodhd".to_string(),
+            country_code: country_code.trim().to_uppercase(),
+            exchange: market,
+            filters: wire,
+            sort,
+            limit,
+            offset,
+            count: rows.len(),
+            rows,
+        })
+    }
+
+    /// Up to 25 company profiles: one pinned vendor call per uncached symbol, memoised.
+    ///
+    /// `/fundamentals` is not entitled on this subscription (HTTP 403 for every ticker), so a
+    /// profile is a screener query pinned to `code` **and** `exchange`. One call per symbol: the
+    /// vendor's `in` operator has unbalanced coverage, so a batched `code in` could silently
+    /// omit a code and there would be no way to tell "no row" from "not covered".
+    ///
+    /// A single symbol's failure is that symbol's `error`, never the batch's.
+    pub async fn profiles(&self, request: ProfileBatch<'_>) -> Result<ProfilesResponse, ProductError> {
+        let raw: Vec<&str> = request.symbols.iter().map(String::as_str).collect();
+        let market = resolve_exchange(request.exchange, request.country_code, &raw, None)?;
+        require_supported_market(&market)?;
+        let client = self
+            .client
+            .clone()
+            .ok_or(ProductError::Unavailable)?;
+
+        let mut roots: Vec<String> = Vec::with_capacity(request.symbols.len());
+        let mut missing: Vec<String> = Vec::new();
+        for symbol in request.symbols {
+            match profile_root(symbol, &market) {
+                Some(root) if !roots.contains(&root) => roots.push(root),
+                Some(_) => {}
+                None => {
+                    let unplaced = symbol.trim().to_uppercase();
+                    if !missing.contains(&unplaced) {
+                        missing.push(unplaced);
+                    }
+                }
+            }
+        }
+
+        let now = now_naive(self.clock.as_ref());
+        let mut profiles: BTreeMap<String, ProfileEntry> = BTreeMap::new();
+        let mut pending: Vec<String> = Vec::new();
+        {
+            let memo = self
+                .profiles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for root in &roots {
+                match memo.get(&(root.clone(), market.clone())) {
+                    Some(hit) if seconds_between(now, hit.stored_at) <= PROFILE_TTL_SECONDS => {
+                        profiles.insert(root.clone(), hit.entry.clone());
+                        self.counters.profile_memo_hits.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => pending.push(root.clone()),
+                }
+            }
+        }
+
+        let fetched = self.fetch_profiles(&client, &pending, &market).await;
+        for entry in &fetched {
+            if !entry.found {
+                if !missing.contains(&entry.symbol) {
+                    missing.push(entry.symbol.clone());
+                }
+            }
+            profiles.insert(entry.symbol.clone(), entry.clone());
+        }
+        self.remember_profiles(&fetched, &market, now);
+        self.counters
+            .profile_calls
+            .fetch_add(fetched.len() as u64, Ordering::Relaxed);
+
+        // `missing` follows the order the caller asked in, whichever way a symbol was lost.
+        let mut ordered_missing: Vec<String> = Vec::new();
+        for root in &roots {
+            if missing.contains(root) {
+                ordered_missing.push(root.clone());
+            }
+        }
+        for unplaced in missing {
+            if !ordered_missing.contains(&unplaced) {
+                ordered_missing.push(unplaced);
+            }
+        }
+
+        Ok(ProfilesResponse {
+            provider: "eodhd".to_string(),
+            country_code: request.country_code.unwrap_or_default().trim().to_uppercase(),
+            exchange: market,
+            requested: request.symbols.len(),
+            complete: ordered_missing.is_empty()
+                && profiles.values().all(|entry| entry.error.is_none()),
+            missing: ordered_missing,
+            profiles,
+        })
+    }
+
+    /// Fetch the uncached profiles at [`PROFILE_CONCURRENCY`], returning them in input order.
+    ///
+    /// The caller's identity is captured and re-scoped inside each task: a task-local does not
+    /// follow a spawned future, and without this the fan-out's spend would be recorded under
+    /// `unknown` rather than the caller that asked.
+    async fn fetch_profiles(
+        &self,
+        client: &Arc<EodhdClient>,
+        roots: &[String],
+        market: &str,
+    ) -> Vec<ProfileEntry> {
+        let caller = current_caller();
+        let mut answers: Vec<ProfileEntry> = Vec::with_capacity(roots.len());
+        for wave in roots.chunks(PROFILE_CONCURRENCY) {
+            let mut set = tokio::task::JoinSet::new();
+            for root in wave {
+                let client = client.clone();
+                let caller = caller.clone();
+                let root = root.clone();
+                let market = market.to_string();
+                set.spawn(async move {
+                    let filters = profile_filters(&root, &market);
+                    let answer = with_caller(Some(&caller), async {
+                        client
+                            .screener(&filters, None, PROFILE_QUERY_LIMIT, 0)
+                            .await
+                    })
+                    .await;
+                    (root, answer)
+                });
+            }
+            while let Some(joined) = set.join_next().await {
+                match joined {
+                    Ok((root, answer)) => answers.push(profile_entry(&root, market, answer)),
+                    // A task that panicked has lost its symbol, so the sweep below still has to
+                    // name it: a symbol silently absent from both `profiles` and `missing` would
+                    // read as "nothing to say" rather than "the lookup broke".
+                    Err(error) => tracing::warn!("a profile lookup task failed: {error}"),
+                }
+            }
+        }
+        for root in roots {
+            if !answers.iter().any(|entry| entry.symbol == *root) {
+                answers.push(profile_entry(
+                    root,
+                    market,
+                    Err(ProviderFailure::new(
+                        "lookup-failed",
+                        "the lookup task did not return",
+                        None,
+                    )),
+                ));
+            }
+        }
+        answers
+    }
+
+    /// Keep the answers worth keeping: found, error-free, inside the cap.
+    ///
+    /// A miss and a failed call are never memoised — inserting either would turn one bad minute
+    /// into an hour of wrong answers. Expired entries are pruned on every insert.
+    fn remember_profiles(&self, fetched: &[ProfileEntry], market: &str, now: NaiveDateTime) {
+        let mut memo = self
+            .profiles
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        memo.retain(|_, hit| seconds_between(now, hit.stored_at) <= PROFILE_TTL_SECONDS);
+        for entry in fetched {
+            if !entry.found || entry.error.is_some() {
+                continue;
+            }
+            if memo.len() >= PROFILE_CACHE_MAX_ENTRIES {
+                if !self.profile_cap_warned.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "the profile memo holds {PROFILE_CACHE_MAX_ENTRIES} entries; new \
+                         profiles are answered but not cached until an entry expires"
+                    );
+                }
+                continue;
+            }
+            memo.insert(
+                (entry.symbol.clone(), market.to_string()),
+                ProfileMemoEntry {
+                    entry: entry.clone(),
+                    stored_at: now,
+                },
+            );
+        }
+    }
+
+    /// Intraday bars for one market, from the owned 5-minute tape, fetching when it is short.
+    ///
+    /// Every timeframe is derived from the same native 5m series, so a response never mixes a
+    /// native bar with an aggregate. A cache hit inside [`Settings::intraday_ttl_seconds`] costs
+    /// nothing; a fetch bills 5 units per symbol and is named in `fetched`.
+    pub async fn intraday(
+        &self,
+        request: IntradayRequest<'_>,
+    ) -> Result<IntradayResponse, ProductError> {
+        let raw: Vec<&str> = request.symbols.iter().map(String::as_str).collect();
+        let market = resolve_exchange(request.exchange, request.country_code, &raw, None)?;
+        require_supported_market(&market)?;
+        let wanted = wanted_symbols(request.symbols, false);
+        if wanted.is_empty() {
+            return Err(
+                MarketDataError::bad_request("no-symbols", "supply at least one symbol").into(),
+            );
+        }
+        if request.limit < 1 {
+            return Err(MarketDataError::bad_request(
+                "bad-limit",
+                "limit must be at least 1",
+            )
+            .into());
+        }
+
+        let limit = request.limit;
+        let timeframe = request.timeframe;
+        let zone = exchange_timezone(&market).unwrap_or(Tz::UTC);
+        let needed = timeframe.native_rows_needed(limit);
+        let now = now_naive(self.clock.as_ref());
+
+        let mut bars: BTreeMap<String, BarsEntry> = BTreeMap::new();
+        let mut fetched: Vec<String> = Vec::new();
+        let mut short: Vec<String> = Vec::new();
+        let mut prunable = false;
+        let take = usize::try_from(limit).unwrap_or(usize::MAX);
+        let zone_of = |at: NaiveDateTime| at.and_utc().with_timezone(&zone).date_naive();
+
+        for symbol in &wanted {
+            // The stored tape is aggregated before the fetch decision, because whether it can
+            // answer is a question about buckets, not rows: a session's last bucket is short,
+            // so a row count alone would refetch a tape that already holds the answer.
+            let stored = self.store.get_intraday_bars(&market, symbol, needed).await?;
+            let stored_bars = aggregate(&rows_from_stored(&stored), timeframe, zone_of);
+            let cached = stored_bars.len() >= take
+                && tape_is_fresh(&stored, now, self.settings.intraday_ttl_seconds);
+
+            let derived = if cached || !request.allow_fetch {
+                if !stored_bars.is_empty() {
+                    self.counters
+                        .intraday_cache_hits
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                stored_bars
+            } else {
+                let client = self.client.as_ref().ok_or(ProductError::Unavailable)?;
+                let native = self
+                    .fetch_intraday(client, symbol, &market, timeframe, limit)
+                    .await?;
+                if !native.is_empty() {
+                    self.write_intraday(symbol, &market, &native).await?;
+                    prunable = true;
+                }
+                fetched.push(symbol.clone());
+                aggregate(&native, timeframe, zone_of)
+            };
+
+            if derived.is_empty() {
+                short.push(symbol.clone());
+                continue;
+            }
+            let start = derived.len().saturating_sub(take);
+            let served = &derived[start..];
+            let source = if fetched.contains(symbol) {
+                "eodhd"
+            } else {
+                "cache"
+            };
+            bars.insert(
+                symbol.clone(),
+                intraday_entry(symbol, served, &market, &zone, source),
+            );
+        }
+
+        if prunable {
+            let cutoff = now - Duration::days(self.settings.intraday_retention_days.max(1));
+            match self.store.prune_intraday(cutoff).await {
+                Ok(0) => {}
+                Ok(deleted) => tracing::info!("intraday tape: pruned {deleted} row(s) before {cutoff}"),
+                // The prune is hygiene, not the answer: a failure is logged and the bars stand.
+                Err(error) => tracing::warn!("intraday tape prune failed ({error})"),
+            }
+        }
+
+        let provider = if fetched.is_empty() { "cache" } else { "eodhd" };
+        tracing::info!(
+            "bars/intraday: market {market}, {timeframe}, limit {limit}, fetched {fetched:?}, \
+             short {short:?}"
+        );
+        Ok(IntradayResponse {
+            exchange: market,
+            provider: provider.to_string(),
+            fetched,
+            short_history: short,
+            bars,
+        })
+    }
+
+    /// One symbol's native 5m bars from the vendor, inside the timeframe's window.
+    async fn fetch_intraday(
+        &self,
+        client: &Arc<EodhdClient>,
+        symbol: &str,
+        market: &str,
+        timeframe: Timeframe,
+        limit: i64,
+    ) -> Result<Vec<IntradayRow>, ProductError> {
+        let days = timeframe.window_days(limit);
+        let end = self.clock.now_utc().timestamp();
+        let start = end - days * 86_400;
+        let payload = client
+            .intraday(symbol, Some(market), timeframe.vendor_interval(), start, end)
+            .await
+            .map_err(provider_refusal)?;
+        let rows = intraday_rows(payload);
+        self.counters
+            .intraday_fetches
+            .fetch_add(1, Ordering::Relaxed);
+        Ok(rows)
+    }
+
+    /// Upsert one symbol's native bars into the owned tape.
+    ///
+    /// Only the native 5m rows are stored: the aggregates are recomputed on read, because a
+    /// stored bucket could disagree with the bars it came from after a re-pull.
+    async fn write_intraday(
+        &self,
+        symbol: &str,
+        market: &str,
+        rows: &[IntradayRow],
+    ) -> Result<(), ProductError> {
+        let writes: Vec<IntradayBarWrite> = rows
+            .iter()
+            .map(|row| IntradayBarWrite {
+                symbol: symbol.to_string(),
+                exchange: Some(market.to_string()),
+                ts_utc: row.ts_utc,
+                open: row.open,
+                high: row.high,
+                low: row.low,
+                close: row.close,
+                volume: row.volume,
+                // The vendor's intraday tape is unadjusted; stored rather than assumed so a
+                // future adjusted source cannot silently mix scales in one series.
+                adjusted: false,
+            })
+            .collect();
+        self.store.upsert_intraday(writes).await?;
+        Ok(())
+    }
+
+    /// Whole-market closes for up to ten sessions, from `DailySnapshot` when complete.
+    ///
+    /// A cached session is served only when `BulkSnapshotPull` records a completed pull for it.
+    /// A pull that returns materially fewer codes than the previous completed session is
+    /// upserted but unmarked, and its key comes back in `partial`: a partial set silently
+    /// changes every derived return that reads it, so it is never served as if whole.
+    pub async fn bulk_closes(
+        &self,
+        market: &str,
+        dates: &[BulkDateKey],
+        allow_fetch: bool,
+    ) -> Result<BulkResponse, ProductError> {
+        let market = exchange_for(market)?;
+        require_supported_market(&market)?;
+
+        let mut response_dates: BTreeMap<String, BulkSession> = BTreeMap::new();
+        let mut partial: Vec<String> = Vec::new();
+        let mut fetched_any = false;
+
+        for key in dates {
+            let requested = key.as_requested();
+            if response_dates.contains_key(&requested) {
+                continue;
+            }
+            let session = match key {
+                BulkDateKey::Latest => {
+                    latest_completed_session(Some(&market), self.clock.now_utc())
+                }
+                BulkDateKey::Session(date) => *date,
+            };
+
+            let marked = self.store.bulk_pull_marker(&market, session).await?.is_some();
+            if !marked {
+                if !allow_fetch {
+                    return Err(MarketDataError::new(
+                        "not-pulled",
+                        format!(
+                            "no completed bulk pull for {market} {session}; this service will \
+                             not return a partial session as if it were whole"
+                        ),
+                        404,
+                    )
+                    .into());
+                }
+                let pulled = self.pull_bulk_session(&market, session).await?;
+                fetched_any = true;
+                if !pulled.complete {
+                    partial.push(requested.clone());
+                }
+                response_dates.insert(
+                    requested,
+                    BulkSession {
+                        session: pulled.session.to_string(),
+                        rows: pulled.rows,
+                    },
+                );
+                continue;
+            }
+
+            let rows = session_closes(&*self.store, &market, session).await?;
+            response_dates.insert(
+                requested,
+                BulkSession {
+                    session: session.to_string(),
+                    rows,
+                },
+            );
+        }
+
+        let provider = if fetched_any { "eodhd" } else { "cache" };
+        Ok(BulkResponse {
+            market,
+            provider: provider.to_string(),
+            partial,
+            dates: response_dates,
+        })
+    }
+
+    /// Pull one session, upsert it, and write the completeness marker when the pull is whole.
+    async fn pull_bulk_session(
+        &self,
+        market: &str,
+        session: NaiveDate,
+    ) -> Result<PulledSession, ProductError> {
+        let client = self.client.as_ref().ok_or(ProductError::Unavailable)?;
+        let rows = client
+            .bulk_last_day(market, Some(session))
+            .await
+            .map_err(provider_refusal)?;
+        self.counters.bulk_pulls.fetch_add(1, Ordering::Relaxed);
+
+        // A vendor asked for a date the exchange did not trade answers with the previous
+        // session; filing those rows under the requested date would invent a duplicate bar.
+        let resolved = crate::jobs::daily::resolved_session(&rows)
+            .map_err(ProductError::from)?
+            .ok_or_else(|| {
+                ProviderFailure::new(
+                    "unparseable",
+                    format!("the bulk pull for {market} {session} carried no dated rows"),
+                    None,
+                )
+            })?;
+
+        let writes: Vec<DailyBarWrite> = rows
+            .iter()
+            .filter_map(|raw| {
+                crate::jobs::daily::row_from_bulk(raw, resolved, market, None)
+            })
+            .collect();
+        let written = writes.len();
+        if !writes.is_empty() {
+            self.store.upsert_daily(writes).await?;
+        }
+
+        let baseline = self
+            .store
+            .latest_bulk_pull_before(market, resolved)
+            .await?
+            .map(|marker| marker.rows);
+        let complete = bulk_pull_is_complete(written, baseline);
+        if complete {
+            self.store
+                .record_bulk_pull(market, resolved, i64::try_from(written).unwrap_or(i64::MAX), "eodhd")
+                .await?;
+        } else {
+            tracing::warn!(
+                "bulk pull for {market} {resolved}: {written} row(s) against a baseline of \
+                 {baseline:?}; unmarked, so the session is reported as partial"
+            );
+        }
+        tracing::info!(
+            "bulk pull: market {market}, session {resolved}, {written} row(s), complete {complete}"
+        );
+
+        let closes = session_closes(&*self.store, market, resolved).await?;
+        Ok(PulledSession {
+            session: resolved,
+            rows: closes,
+            complete,
+        })
+    }
+
     /// `/stats`: counters, vendor spend, router outcomes and the snapshot's state.
     pub async fn stats(&self) -> StatsResponse {
         let state = self.bulk.lock().await;
@@ -1400,6 +2158,346 @@ impl Products {
             },
         }
     }
+}
+
+/// The two markets this service's model serves, stated once.
+///
+/// `resolve_exchange` knows every exchange the vendor does; this service's caches, warehouses
+/// and schedules are built for US and AU. A resolved market outside `COUNTRIES` is refused here
+/// rather than half-served — widening the service to a third country is a change to that table,
+/// the storage and the schedules, not to one route.
+fn require_supported_market(market: &str) -> Result<(), MarketDataError> {
+    if COUNTRIES.iter().any(|country| country.exchange == market) {
+        return Ok(());
+    }
+    Err(MarketDataError::bad_request(
+        "unknown-exchange",
+        format!(
+            "{} is not a market this service serves; it carries {}",
+            py_repr(market),
+            COUNTRIES
+                .iter()
+                .map(|country| country.exchange)
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ),
+    ))
+}
+
+/// A provider failure split the way the egress routes' contract states it.
+///
+/// A vendor 400 or 422 says the query was wrong, so it is the caller's mistake: 422
+/// `vendor-rejected` with the vendor's own message. Everything else — a 5xx, a transport
+/// failure, a rate limit, an unparseable body — stays a 502 whose `error` is the provider
+/// reason. Retrying is already handled inside the client, so nothing here retries.
+fn provider_refusal(failure: ProviderFailure) -> ProductError {
+    match failure.status {
+        Some(status @ (400 | 422)) => ProductError::Refused(MarketDataError::new(
+            "vendor-rejected",
+            if failure.detail.is_empty() {
+                format!("the vendor rejected the query with HTTP {status}")
+            } else {
+                failure.detail
+            },
+            422,
+        )),
+        _ => ProductError::Provider(failure),
+    }
+}
+
+/// The rows out of the vendor's `{"data": [...]}` envelope.
+///
+/// Unwrapping here rather than in the client makes an unexpected envelope a visible
+/// `unparseable` failure instead of an empty screen — the vendor answers a bad value with 200
+/// and zero rows, so "no rows" must never be this service's guess about a shape it did not
+/// understand.
+fn screener_rows(body: Value) -> Result<Vec<Value>, ProductError> {
+    match body {
+        Value::Object(mut object) => match object.remove("data") {
+            Some(Value::Array(rows)) => Ok(rows),
+            other => Err(ProviderFailure::new(
+                "unparseable",
+                format!(
+                    "the screener answer has no data array (data was {})",
+                    match other {
+                        None => "absent".to_string(),
+                        Some(value) => value.to_string(),
+                    }
+                ),
+                None,
+            )
+            .into()),
+        },
+        other => Err(ProviderFailure::new(
+            "unparseable",
+            format!("expected the screener's envelope object, got {other}"),
+            None,
+        )
+        .into()),
+    }
+}
+
+/// The vendor root a profile lookup is pinned to, or `None` when the renderer cannot place it.
+///
+/// The same `domain::symbols` resolution `/price` uses, so `WDS.AU` and `WDS` at an AU request
+/// become the same root. A symbol the renderer cannot place is reported as missing rather than
+/// filed under a guessed venue.
+fn profile_root(symbol: &str, market: &str) -> Option<String> {
+    let ticker = symbol_for_provider(
+        symbol,
+        AssetClass::Shares,
+        Some(market),
+        ProviderId::Eodhd,
+    )?;
+    let suffix = format!(".{market}");
+    Some(ticker.strip_suffix(&suffix).unwrap_or(&ticker).to_string())
+}
+
+/// One symbol's profile from its screener answer.
+///
+/// A provider failure is this symbol's `error`, not the batch's. A row whose `code` does not
+/// match is not a profile: the vendor keeps one row per listing, so a code can answer with
+/// several rows and the first matching one is the listing that was asked about.
+fn profile_entry(
+    root: &str,
+    market: &str,
+    answer: Result<Value, ProviderFailure>,
+) -> ProfileEntry {
+    let mut entry = ProfileEntry {
+        symbol: root.to_string(),
+        exchange: market.to_string(),
+        found: false,
+        name: None,
+        sector: None,
+        industry: None,
+        market_cap: None,
+        currency: None,
+        country: None,
+        gic_sector: None,
+        gic_industry: None,
+        description: None,
+        as_of: None,
+        error: None,
+    };
+    let body = match answer {
+        Ok(body) => body,
+        Err(failure) => {
+            entry.error = Some(failure.reason);
+            return entry;
+        }
+    };
+    let rows = match screener_rows(body) {
+        Ok(rows) => rows,
+        Err(error) => {
+            entry.error = Some(match error {
+                ProductError::Provider(failure) => failure.reason,
+                other => other.to_string(),
+            });
+            return entry;
+        }
+    };
+    let Some(row) = rows.iter().find(|row| {
+        row.get("code")
+            .and_then(Value::as_str)
+            .is_some_and(|code| code.trim().eq_ignore_ascii_case(root))
+    }) else {
+        return entry;
+    };
+    entry.found = true;
+    entry.name = row_field(row, "name");
+    entry.sector = row_field(row, "sector");
+    entry.industry = row_field(row, "industry");
+    entry.market_cap = row.get("market_capitalization").and_then(number);
+    entry.currency = row_field(row, "currency_symbol").and_then(|raw| currency_code(&raw));
+    entry.as_of = row_field(row, "last_day_data_date").map(|raw| date_prefix(&raw));
+    entry
+}
+
+/// A text field of a vendor row, trimmed, with blanks treated as absent.
+fn row_field(row: &Value, name: &str) -> Option<String> {
+    row.get(name)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+/// A currency code only when the vendor's value has the ISO-4217 shape.
+///
+/// The vendor answers with three upper-case letters on the listings this service serves; a
+/// longer or mixed-case value is a different kind of label, and passing it through would put a
+/// non-currency in a currency field.
+fn currency_code(raw: &str) -> Option<String> {
+    let text = raw.trim();
+    (text.len() == 3 && text.chars().all(|character| character.is_ascii_uppercase()))
+        .then(|| text.to_string())
+}
+
+/// The date part of a vendor timestamp (`2026-11-11T00:00:00` -> `2026-11-11`).
+fn date_prefix(raw: &str) -> String {
+    raw.trim().split('T').next().unwrap_or_default().to_string()
+}
+
+/// Whether the stored tape was fetched recently enough to answer.
+///
+/// Length is not part of this: how many buckets the tape can produce is a question about the
+/// bars, and the caller has already aggregated them. This is only the TTL.
+fn tape_is_fresh(stored: &[StoredIntradayBar], now: NaiveDateTime, ttl_seconds: f64) -> bool {
+    if stored.is_empty() {
+        return false;
+    }
+    stored
+        .iter()
+        .filter_map(|bar| bar.fetched_at)
+        .max()
+        .is_some_and(|fetched_at| seconds_between(now, fetched_at) <= ttl_seconds)
+}
+
+/// The stored native rows in the pure aggregator's shape, dropping any half-written row.
+fn rows_from_stored(stored: &[StoredIntradayBar]) -> Vec<IntradayRow> {
+    stored
+        .iter()
+        .filter_map(|bar| {
+            Some(IntradayRow {
+                ts_utc: bar.ts_utc,
+                open: bar.open?,
+                high: bar.high?,
+                low: bar.low?,
+                close: bar.close?,
+                volume: bar.volume.unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// The vendor's intraday rows as bars.
+///
+/// The vendor stamps a row with epoch `timestamp` seconds, or with ISO `datetime`/`date` text.
+/// Naive text is read as UTC, which is the convention the source adapter already uses. A row
+/// that cannot be read is dropped rather than served as a zero; the client has already refused
+/// a body that is not an array, so there is no failure left to report here.
+fn intraday_rows(rows: Vec<Value>) -> Vec<IntradayRow> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let Some(ts_utc) = intraday_timestamp(row) else {
+            continue;
+        };
+        let (Some(open), Some(high), Some(low), Some(close)) = (
+            row.get("open").and_then(number),
+            row.get("high").and_then(number),
+            row.get("low").and_then(number),
+            row.get("close").and_then(number),
+        ) else {
+            continue;
+        };
+        out.push(IntradayRow {
+            ts_utc,
+            open,
+            high,
+            low,
+            close,
+            volume: row
+                .get("volume")
+                .and_then(number)
+                .map(|value| value as i64)
+                .unwrap_or(0),
+        });
+    }
+    out
+}
+
+/// One vendor row's opening instant, from its `timestamp` or its ISO text.
+fn intraday_timestamp(row: &Value) -> Option<NaiveDateTime> {
+    if let Some(epoch) = row.get("timestamp").and_then(number) {
+        return chrono::DateTime::from_timestamp(epoch as i64, 0).map(|at| at.naive_utc());
+    }
+    let text = row
+        .get("datetime")
+        .and_then(Value::as_str)
+        .or_else(|| row.get("date").and_then(Value::as_str))?
+        .trim();
+    NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S")
+        .or_else(|_| NaiveDateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S"))
+        .or_else(|_| {
+            NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                .map(|date| date.and_hms_opt(0, 0, 0).unwrap_or_default())
+        })
+        .ok()
+}
+
+/// One symbol's intraday series in the `/bars` payload shape.
+///
+/// `d` is an exchange-local ISO timestamp rather than a session date, because an intraday bar
+/// is a moment. `cr` is null: the vendor's intraday tape is unadjusted and carries no separate
+/// raw print.
+fn intraday_entry(
+    symbol: &str,
+    rows: &[IntradayRow],
+    market: &str,
+    zone: &Tz,
+    source: &str,
+) -> BarsEntry {
+    let local = |at: NaiveDateTime| at.and_utc().with_timezone(zone);
+    BarsEntry {
+        symbol: symbol.to_string(),
+        exchange: market.to_string(),
+        as_of_session: rows
+            .last()
+            .map(|row| local(row.ts_utc).date_naive().to_string()),
+        sessions: rows.len(),
+        // Every series in this response is derived from the unadjusted 5m tape.
+        adjusted: false,
+        provider: source.to_string(),
+        source: source.to_string(),
+        rows: rows
+            .iter()
+            .map(|row| BarRow {
+                d: local(row.ts_utc).format("%Y-%m-%dT%H:%M:%S").to_string(),
+                o: Some(row.open),
+                h: Some(row.high),
+                l: Some(row.low),
+                c: Some(row.close),
+                cr: None,
+                v: Some(row.volume),
+            })
+            .collect(),
+    }
+}
+
+/// Whether a pull wrote enough rows to be called whole.
+///
+/// A first pull has no baseline and is trusted; a pull of nothing never is. Otherwise the floor
+/// is [`BULK_MIN_COMPLETENESS_RATIO`] of the previous completed session's count.
+fn bulk_pull_is_complete(written: usize, baseline: Option<i64>) -> bool {
+    if written == 0 {
+        return false;
+    }
+    match baseline {
+        Some(baseline) if baseline > 0 => {
+            written as f64 >= baseline as f64 * BULK_MIN_COMPLETENESS_RATIO
+        }
+        _ => true,
+    }
+}
+
+/// One session's closes in the response shape.
+async fn session_closes(
+    store: &dyn ProductsStore,
+    market: &str,
+    session: NaiveDate,
+) -> Result<BTreeMap<String, BulkClose>, ProductError> {
+    let rows = store.session_closes(market, session).await?;
+    Ok(rows
+        .into_iter()
+        .map(|(symbol, close)| (symbol, BulkClose { c: close }))
+        .collect())
+}
+
+/// What one pull of a whole session produced.
+struct PulledSession {
+    session: NaiveDate,
+    rows: BTreeMap<String, BulkClose>,
+    complete: bool,
 }
 
 /// A provider quote as a `SymbolPriceCache` row.

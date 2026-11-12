@@ -205,7 +205,10 @@ where
 /// The date is read as text and compared as text first, which is what the source service did;
 /// ISO-8601 dates sort chronologically. A newest date that is not a date is a vendor
 /// contradiction and is refused rather than skipped.
-fn resolved_session(rows: &[Value]) -> Result<Option<NaiveDate>, RefreshFailure> {
+///
+/// Public because `POST /bars/bulk` must file a pull under the session the vendor answered
+/// with, not the session that was asked for — one rule, one implementation.
+pub fn resolved_session(rows: &[Value]) -> Result<Option<NaiveDate>, RefreshFailure> {
     let newest = rows
         .iter()
         .filter_map(|row| text(row.get("date")?))

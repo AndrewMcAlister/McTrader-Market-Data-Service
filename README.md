@@ -16,6 +16,8 @@ McTrader      ─┘        │
                         ├── SymbolPriceCache   (5-minute prices)
                         ├── DailySnapshot      (daily bars, one row per symbol-session)
                         ├── IndicatorCache     (precomputed ATR)
+                        ├── IntradayBar5Min    (the owned 5-minute tape)
+                        ├── BulkSnapshotPull   (which whole-market sessions are complete)
                         └── mmds-daily ──▶ /eod-bulk-last-day ──▶ DailySnapshot
 ```
 
@@ -41,11 +43,12 @@ McTrader      ─┘        │
 src/
   config.rs              settings, environment parsing, key resolution
   error.rs               typed errors and their HTTP rendering
-  domain/                pure rules: ATR, sessions, exchanges, availability, symbols, asset classes
+  domain/                pure rules: ATR, sessions, exchanges, availability, symbols, asset classes,
+                         the screener vocabulary, intraday aggregation
   clock.rs               dual market clock (dbo.Exchanges + data/clock.json fallback)
   store/                 tiberius pool, schema, repositories, SQL builders
   providers/             EODHD, Yahoo, Binance and the per-asset-class router
-  products.rs            price / bars / ATR orchestration and the caches
+  products.rs            price / bars / ATR / screener / profile / intraday orchestration and the caches
   usage.rs               tariff, spend ledger, caller attribution
   secrets.rs             Windows credential store get / set / delete / mask
   refresh.rs             single-flight whole-market refresh
@@ -82,6 +85,8 @@ Every cache that matters lives here:
 | prices | `SymbolPriceCache` + an in-memory whole-market snapshot | 300 s / one cycle |
 | daily bars | `DailySnapshot` | keyed on the completed session, not a clock |
 | ATR | `IndicatorCache` | rebuilt after each daily load |
+| intraday bars | `IntradayBar5Min` | 300 s (`MDS_INTRADAY_TTL_SECONDS`), pruned to 30 days |
+| profiles | in-process memo | 3600 s, 4096 entries, misses never kept |
 
 **A consumer must not keep its own.** Two caches for one dataset with independent TTLs do not expire
 together, and the first request after a restart gets one answer from each — a stop computed from a
@@ -90,7 +95,7 @@ what to delete in McTrader.
 
 ---
 
-## The four endpoints
+## The endpoints
 
 Every endpoint that takes a symbol also **requires** `country_code` — `US` or `AU` — because a
 ticker is not unique across exchanges (`CBA` is an ASX listing *and* a US one) and a request that
@@ -101,9 +106,18 @@ the same fact and must agree with the country; a contradiction is a 400 (`exchan
 because serving either market silently is how two exchanges' prices get mixed.
 Every answer states the market it used.
 
-There is no asset-class parameter. The vendor taxonomy proved unreliable, so every symbol is
-priced as a share and takes the EODHD → Yahoo route; crypto and indices are not selectable
-through this API.
+`asset_class` is an **optional** field on the four symbol routes (`/price`, `/prices`, `/atr`,
+`/bars`). Absent means `shares`, which is what every existing caller means; present it with
+`indices`, `commodities`, `rates` or any other spelling the service accepts, and the symbol is
+priced on that class's route. A spelling it does not know is a 422 rather than a silent share:
+an index priced as a share is a *different instrument*, which is why the market picture's
+`IXIC`, `GSPC`, `GLD`, `SLV`, `BNO`, `UUP` and `US10Y` came back `unpriced`.
+
+Four routes exist for a service-to-service caller rather than a book: `/bars/intraday`,
+`/bars/bulk`, `/screener` and `/profile`. They are transports — the intraday tape, whole-market
+closes, raw screener rows and a company profile — and they own no floors, ranking or scoring.
+They are deliberately absent from the MCP surface, because an MCP tool would invite a model to
+drive them.
 
 ### `GET /price/{symbol}`
 
@@ -252,15 +266,14 @@ POST /bars
 GET /price/{symbol}
 ```
 
-The router's order is per asset class, not one global list. The HTTP and MCP surfaces no longer
-take an asset class — the vendor taxonomy behind it was not reliable — so every request is
-priced as `shares` and takes the EODHD → Yahoo order:
+The router's order is per asset class, not one global list, and `asset_class` is how an HTTP
+request states one. Absent, a request is priced as `shares` and takes the EODHD → Yahoo order:
 
-| Internal asset class | order | why |
+| Asset class | order | why |
 |---|---|---|
-| `shares` (every HTTP request) | EODHD → Yahoo | EODHD is adjusted and consistent; Yahoo is the free fallback |
+| `shares` (the default) | EODHD → Yahoo | EODHD is adjusted and consistent; Yahoo is the free fallback |
 | `indices` / `commodities` / `rates` / `forex` | EODHD → Yahoo | EODHD renders these as `.INDX` / US ETF proxies; Yahoo has real `^IXIC`, `GC=F` |
-| `crypto` (library callers only) | **Binance** → EODHD → Yahoo | the pair is quoted natively rather than rendered as `BTC.CC` |
+| `crypto` | **Binance** → EODHD → Yahoo | the pair is quoted natively rather than rendered as `BTC.CC` |
 
 A provider that cannot serve an asset class is never asked. Every quote and bar carries the
 `provider` that answered — **that field is load-bearing**, not decoration: this estate has
@@ -375,7 +388,7 @@ Smoothing is the same story: `simple` is what both stop books use (so it is the 
 
 ## Data model
 
-Three tables the service owns, created by `sql/001_schema.sql`, in the database
+Five tables the service owns, created by `sql/001_schema.sql`, in the database
 `MDS_DATABASE` points at (`Market_Data` today), plus the clock's exchange reference.
 The script names no database, so a rename is config, not migration. The SQL scripts are shared
 verbatim with the Python reference — a database prepared for one is prepared for the other.
@@ -385,7 +398,16 @@ verbatim with the Python reference — a database prepared for one is prepared f
 | `SymbolPriceCache` | symbol × exchange | latest known price, overwritten in place |
 | `DailySnapshot` | symbol × exchange × session | daily OHLCV, appended once per session per exchange |
 | `IndicatorCache` | symbol × exchange | precomputed ATR 14/20/22/26/50 for one exchange's series |
+| `IntradayBar5Min` | symbol × exchange × 5-minute bar | the owned intraday tape: native 5m rows only, unadjusted, pruned to `MDS_INTRADAY_RETENTION_DAYS` |
+| `BulkSnapshotPull` | market × session | one row per **completed** whole-market pull — the completeness marker `/bars/bulk` reads |
 | `Exchanges` | one row per exchange | `Code`, `Timezone`, `Opens`, `Closes` in the exchange's own local time; copied from `McTrader_Live.dbo.Exchanges` by `mmds-tool copy-exchanges` and read by the market clock |
+
+The last two arrived with the egress routes. `IntradayBar5Min` stores only the vendor's native
+5-minute rows: the 15m/30m/1h/4h bars are derived on read, so a derived bar can never disagree
+with the bars it came from. `BulkSnapshotPull` exists because a row in `DailySnapshot` says "this
+symbol traded that day", not "this market was fully pulled that day" — and the latest session can
+be a partial write (1,881 rows against ~27,714), which would silently change every derived return
+read from it.
 
 The market clock reads the exchange hours from `dbo.Exchanges`, not from
 `data/clock.json`. The JSON keeps the broker table, the asset-class rules and the
@@ -444,8 +466,8 @@ Notes that are load-bearing:
   reaches that horizon is refreshed for the requested sessions instead, so the fill is a
   one-off per symbol rather than a rewrite on every daily refresh. The horizon is what makes
   support and resistance levels computable from one call.
-- `TableDoc` / `ColumnDoc` rows are written for all three tables, following this database's
-  own convention.
+- `TableDoc` / `ColumnDoc` rows are written for every table the service owns, following this
+  database's own convention.
 
 ### Indexes, and the weekly rebuild
 
@@ -762,6 +784,8 @@ All by environment variable; defaults are the safe ones.
 | `MDS_SCHEDULE_PRICE_UNIVERSE` | `100` | ASX symbols priced individually by the schedule |
 | `MDS_MIN_SESSIONS` | `15` | sessions before ATR will answer |
 | `MDS_HISTORY_SESSIONS` | `560` | depth a vendor refresh asks for and keeps (~2 years) |
+| `MDS_INTRADAY_TTL_SECONDS` | `300` | how long `/bars/intraday` answers from the owned 5-minute tape before asking the vendor again |
+| `MDS_INTRADAY_RETENTION_DAYS` | `30` | how many days of 5-minute bars the tape keeps |
 | `MDS_ATR_PERIODS` | `14,20,22,26,50` | periods computed into IndicatorCache |
 | `MDS_ATR_PERIOD` | `14` | default period when a request does not name one |
 | `MDS_ATR_METHOD` | `tr` | `tr` (the agreed standard) or `high_low` |
@@ -1178,18 +1202,30 @@ alternate.
 
 **In:** prices (one and many), daily bars, ATR, stop levels, the daily bulk load, whole-market
 snapshots, provider routing across EODHD, Yahoo and Binance (including crypto, forex, indices and
-commodities), the market clock and collection schedule, and the MCP proxy.
+commodities), the market clock and collection schedule, **raw screener rows, basic company
+profiles, a 5-minute intraday tape and whole-market closes for several sessions**, and the MCP
+proxy for the original four products.
 
-**Out:** screener, company profiles, fundamentals, news, streaming, order-book depth, tick history,
-5-minute bar construction, and portfolio or risk logic.
+**Out:** scoring, ranking policy, liquidity floors, screen-eligibility rules, portfolio or risk
+logic, fundamentals beyond the profile fields a screener row carries, news, streaming, order-book
+depth and tick history.
 
 > **Rule:** this project may not link to, import from or depend on McTrader code
 > (`McTrader/services/`, `McTrader/ai_traders/`, `McTrader/broker_adapters/`).
 
 The service exists so that the data layer stays up when the trader does not. Its availability
-*is* its justification, and every scope addition erodes it. If it grows a screener, profiles,
-crypto and a scoring layer, it becomes a second trading engine and the reason to have it
-disappears.
+*is* its justification, and every scope addition erodes it.
+
+The screener and profile routes are the one boundary worth stating precisely, because they look
+like a violation and are not: **the boundary is policy, not payload shape.** The service may
+transport a screener query, a profile lookup and an intraday fetch; it must not own the decisions
+about them. Which filters, floors, sort and limit to send, which rows are candidates, rejections
+or duplicates, and whether a company is investable all stay in McTrader. What lives here is the
+vendor call and its retry, rate-limit handling, timeout, billing and ledger; the transport
+contract — the 14 screener fields, their operators, the sort syntax, the limit bounds, the
+one-venue agreement; the parsing and rendering of vendor rows; and the owned caches with their
+TTLs. No scoring, no ranking, no threshold that decides whether a company is investable: a future
+reader who wants to add one is adding it in the wrong process.
 
 Sentiment deliberately stays in McTrader for now.
 

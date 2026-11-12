@@ -1,6 +1,6 @@
-//! The EODHD client: five vendor calls, and no blind retries.
+//! The EODHD client: six vendor calls, and no blind retries.
 //!
-//! Everything the service needs from the vendor is one of five requests:
+//! Everything the service needs from the vendor is one of six requests:
 //!
 //! | Purpose                    | Request                                          | Billed      |
 //! |----------------------------|--------------------------------------------------|-------------|
@@ -9,6 +9,7 @@
 //! | one symbol's daily history | `/eod/{SYM}.{EX}?from=...&period=d`              | 1 flat      |
 //! | one symbol's intraday bars | `/intraday/{SYM}.{EX}?interval=5m&from=...`      | 5 flat      |
 //! | one session, whole market  | `/eod-bulk-last-day/{MARKET}?date=YYYY-MM-DD`    | 100 flat    |
+//! | a screener query           | `/screener?filters=[...]&sort=...`               | 5 flat      |
 //!
 //! Two facts about the tariff drive the code:
 //!
@@ -484,6 +485,47 @@ impl EodhdClient {
             .await?;
         expect_array(payload)
     }
+
+    /// One screener query, as the vendor answered it. Billed 5 flat.
+    ///
+    /// Every filter travels in a single JSON-encoded `filters` parameter: the vendor ignores a
+    /// bare top-level `exchange`, which is why the venue is one of the triples rather than a
+    /// parameter of its own.
+    ///
+    /// The body is returned raw. `/screener` answers `{"data": [...]}`, and unwrapping that is
+    /// the caller's job so an unexpected envelope is a visible failure rather than an empty
+    /// screen.
+    ///
+    /// The 30-second `eodhd_timeout_seconds` applies, like `/real-time/` and `/eod/`; this is
+    /// the bound a `/profile` fan-out multiplies.
+    pub async fn screener(
+        &self,
+        filters: &[Value],
+        sort: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Value, ProviderFailure> {
+        let encoded = serde_json::to_string(filters).map_err(|error| {
+            ProviderFailure::new(
+                "unparseable",
+                format!("the filters could not be encoded as JSON ({error})"),
+                None,
+            )
+        })?;
+        let mut params: Vec<(String, String)> = vec![("filters".to_string(), encoded)];
+        if let Some(sort) = sort {
+            params.push(("sort".to_string(), sort.to_string()));
+        }
+        params.push(("limit".to_string(), limit.to_string()));
+        params.push(("offset".to_string(), offset.to_string()));
+        self.get_json(
+            "screener",
+            &params,
+            Billing::new("screener", 5, 0),
+            self.timeout,
+        )
+        .await
+    }
 }
 
 /// What one vendor call costs and which tariff row prices it.
@@ -515,7 +557,7 @@ impl<'a> Billing<'a> {
     }
 }
 
-/// The five vendor calls behind a trait, so a provider test can script them.
+/// The six vendor calls behind a trait, so a provider test can script them.
 ///
 /// Without this the provider adapter would need a mock HTTP server to exercise its parsing,
 /// which would make a pure mapping test depend on the network layer's retry policy.
@@ -547,6 +589,13 @@ pub trait EodhdApi: Send + Sync {
         market: &str,
         session_date: Option<NaiveDate>,
     ) -> Result<Vec<Value>, ProviderFailure>;
+    async fn screener(
+        &self,
+        filters: &[Value],
+        sort: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Value, ProviderFailure>;
 }
 
 #[async_trait::async_trait]
@@ -590,6 +639,16 @@ impl EodhdApi for EodhdClient {
         session_date: Option<NaiveDate>,
     ) -> Result<Vec<Value>, ProviderFailure> {
         EodhdClient::bulk_last_day(self, market, session_date).await
+    }
+
+    async fn screener(
+        &self,
+        filters: &[Value],
+        sort: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Value, ProviderFailure> {
+        EodhdClient::screener(self, filters, sort, limit, offset).await
     }
 }
 
@@ -1021,5 +1080,116 @@ mod tests {
         assert_eq!(query_value(&requests[0], "to"), Some("2026-11-03".into()));
         assert_eq!(query_value(&requests[0], "period"), Some("d".into()));
         assert_eq!(query_value(&requests[0], "order"), Some("a".into()));
+    }
+
+    #[tokio::test]
+    async fn the_screener_encodes_every_filter_as_one_json_parameter() {
+        let server = MockServer::start().await;
+        let body = json!({"data": [{"code": "AAPL", "exchange": "US"}]});
+        Mock::given(method("GET"))
+            .and(path("/api/screener"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        let filters = vec![
+            json!(["market_capitalization", ">", 300_000_000]),
+            json!(["exchange", "=", "US"]),
+        ];
+        let payload = client
+            .screener(&filters, Some("refund_5d_p.desc"), 50, 10)
+            .await
+            .unwrap();
+
+        // The raw envelope is returned: unwrapping `data` is the caller's job, so an unexpected
+        // envelope is a visible failure rather than an empty screen.
+        assert_eq!(payload, body);
+        assert_eq!(client.stats().units, 5);
+        assert_eq!(client.stats().calls_by_purpose.get("screener"), Some(&1));
+
+        let requests = requests(&server).await;
+        assert_eq!(requests.len(), 1);
+        let encoded = query_value(&requests[0], "filters").expect("a filters parameter");
+        assert_eq!(
+            serde_json::from_str::<Value>(&encoded).unwrap(),
+            Value::Array(filters)
+        );
+        assert_eq!(
+            query_value(&requests[0], "sort"),
+            Some("refund_5d_p.desc".into())
+        );
+        assert_eq!(query_value(&requests[0], "limit"), Some("50".into()));
+        assert_eq!(query_value(&requests[0], "offset"), Some("10".into()));
+    }
+
+    #[tokio::test]
+    async fn a_screener_sort_is_omitted_when_none_was_asked_for() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/screener"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        client.screener(&[], None, 100, 0).await.unwrap();
+
+        let requests = requests(&server).await;
+        assert_eq!(query_value(&requests[0], "sort"), None);
+        assert_eq!(query_value(&requests[0], "filters"), Some("[]".into()));
+    }
+
+    #[tokio::test]
+    async fn a_rejected_screen_is_billed_once_and_never_retried() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/screener"))
+            .respond_with(
+                ResponseTemplate::new(422)
+                    .set_body_string(r#"{"error":"Invalid filter field: market_cap"}"#),
+            )
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        let error = client
+            .screener(&[json!(["market_cap", ">", 1])], None, 100, 0)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.reason, "http-error");
+        assert_eq!(error.status, Some(422));
+        assert!(error.detail.contains("market_cap"), "{error}");
+        // A 4xx is billed, so retrying it would pay twice for the same rejected question.
+        assert_eq!(requests(&server).await.len(), 1);
+        assert_eq!(client.stats().units, 5);
+    }
+
+    #[tokio::test]
+    async fn a_screener_429_is_retried_and_not_billed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/screener"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0"))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/screener"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": [{"code": "AAPL"}]})),
+            )
+            .with_priority(2)
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        let payload = client.screener(&[], None, 100, 0).await.unwrap();
+
+        assert_eq!(payload["data"][0]["code"], "AAPL");
+        assert_eq!(requests(&server).await.len(), 2);
+        assert_eq!(client.stats().units, 5);
     }
 }

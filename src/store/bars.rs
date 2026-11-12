@@ -11,7 +11,7 @@
 //! plain batch persists the temp table for the session, while a parameterised call
 //! (`sp_executesql`) scopes it to that dynamic batch and drops it on return.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 use chrono::NaiveDate;
@@ -113,6 +113,18 @@ pub trait DailyBarRepository: Send + Sync {
     /// This is the indicator rebuild's work list. It is a store query rather than a scan of
     /// `DailySnapshot` in the job because the grouping and the count belong with the table.
     async fn symbols_with_min_sessions(&self, minimum: i64) -> Result<Vec<SeriesKey>, StoreError>;
+
+    /// One session's adjusted close per symbol, ordered by symbol.
+    ///
+    /// This is `/bars/bulk`'s read: the whole market for one date, with no filter. `Close` is
+    /// the adjusted series, which is what a return window is computed from; the raw print in
+    /// `RawClose` is deliberately not exposed here because nothing consumes it through that
+    /// route.
+    async fn session_closes(
+        &self,
+        exchange: &str,
+        session: NaiveDate,
+    ) -> Result<BTreeMap<String, f64>, StoreError>;
 }
 
 #[async_trait]
@@ -319,6 +331,31 @@ impl DailyBarRepository for SqlServerStore {
                 })
             })
             .collect()
+    }
+
+    async fn session_closes(
+        &self,
+        exchange: &str,
+        session: NaiveDate,
+    ) -> Result<BTreeMap<String, f64>, StoreError> {
+        let exchange = read_exchange_key(Some(exchange));
+        let mut client = self.connection().await?;
+        let rows = query_rows(
+            &mut client,
+            "SELECT SymbolCode, [Close] FROM dbo.DailySnapshot \
+              WHERE Exchange = @P1 AND SnapshotDate = @P2 \
+              ORDER BY SymbolCode",
+            &[SqlParam::text(&exchange), SqlParam::date(session)],
+        )
+        .await?;
+        let mut closes = BTreeMap::new();
+        for row in &rows {
+            let symbol = required_text(row, 0, "SymbolCode")?.to_uppercase();
+            if let Some(close) = decimal(row, 1)? {
+                closes.insert(symbol, close);
+            }
+        }
+        Ok(closes)
     }
 }
 

@@ -759,3 +759,661 @@ fn the_pinned_instant_completes_the_previous_us_session() {
         date(2026, 10, 29)
     );
 }
+
+// ---------------------------------------------------------------------------
+// the four EODHD egress routes
+// ---------------------------------------------------------------------------
+//
+// These go through a real `EodhdClient` pointed at a mock vendor, because `Products` holds the
+// concrete client: the request path the endpoint really uses — the encoded `filters` parameter,
+// the tariff, the retry rule — is then exercised rather than bypassed. The store stays the
+// in-memory fake, so nothing reaches a database, and no test spends quota.
+
+mod egress {
+    use std::sync::Arc;
+
+    use chrono::NaiveDate;
+    use common::{date, FakeProvider, FakeStore, TestClock};
+    use mmds::clock::Clock;
+    use mmds::domain::intraday::Timeframe;
+    use mmds::error::MarketDataError;
+    use mmds::products::{
+        BulkDateKey, IntradayRequest, ProductError, Products, ProfileBatch,
+    };
+    use mmds::providers::eodhd_client::EodhdClient;
+    use serde_json::{json, Value};
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::common;
+    use crate::symbols;
+
+    /// The instant these tests are pinned at: one minute after the 2026-11-12 US session's last
+    /// 5-minute bar, so the tape written by a fetch is inside its TTL.
+    fn egress_clock() -> Arc<TestClock> {
+        Arc::new(TestClock::new(
+            NaiveDate::from_ymd_opt(2026, 11, 12)
+                .unwrap()
+                .and_hms_opt(21, 0, 0)
+                .unwrap()
+                .and_utc(),
+        ))
+    }
+
+    /// The products layer over the real client, a mock vendor and the in-memory store.
+    async fn setup(server: &MockServer) -> (Products, Arc<FakeStore>, Arc<TestClock>) {
+        let store = Arc::new(FakeStore::new());
+        let clock = egress_clock();
+        store.set_now(clock.now_utc().naive_utc());
+        let provider = Arc::new(FakeProvider::new("eodhd"));
+        let client = Arc::new(
+            EodhdClient::new("test-key", format!("{}/api", server.uri()), 5.0, 5.0)
+                .expect("a client with a key"),
+        );
+        let products = Products::new(
+            common::test_settings(),
+            store.clone(),
+            Some(client),
+            Some(common::router_with(&provider)),
+            clock.clone(),
+        )
+        .await
+        .expect("the layered product builds");
+        (products, store, clock)
+    }
+
+    fn refusal(error: ProductError) -> MarketDataError {
+        match error {
+            ProductError::Refused(error) => error,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    async fn requests(server: &MockServer) -> usize {
+        server.received_requests().await.unwrap().len()
+    }
+
+    fn query(request: &wiremock::Request, name: &str) -> Option<String> {
+        request
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.into_owned())
+    }
+
+    /// One screener answer, matching a request whose `filters` parameter is exactly `filters`.
+    async fn mount_screen(server: &MockServer, filters: Value, body: Value, status: u16) {
+        Mock::given(method("GET"))
+            .and(path("/api/screener"))
+            .and(query_param("filters", filters.to_string()))
+            .respond_with(ResponseTemplate::new(status).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    /// A profile answer: one row for `code` at `venue`, or an empty `data`.
+    async fn mount_profile(server: &MockServer, code: &str, venue: &str, row: Option<Value>) {
+        let filters = json!([["code", "=", code], ["exchange", "=", venue]]);
+        let body = match row {
+            Some(row) => json!({"data": [row]}),
+            None => json!({"data": []}),
+        };
+        mount_screen(server, filters, body, 200).await;
+    }
+
+    // -- POST /screener ----------------------------------------------------
+
+    #[tokio::test]
+    async fn a_screen_appends_the_requested_venue_once_and_returns_the_rows_untouched() {
+        let server = MockServer::start().await;
+        let rows = json!([
+            {"code": "AAPL", "exchange": "US", "sector": "Technology", "market_capitalization": 3.5e12},
+            {"code": "MSFT", "exchange": "US", "sector": null, "currency_symbol": "USD"}
+        ]);
+        let wire = json!([
+            ["market_capitalization", ">", 300000000],
+            ["exchange", "=", "NASDAQ"]
+        ]);
+        mount_screen(&server, wire.clone(), json!({"data": rows.clone()}), 200).await;
+        let (products, store, _) = setup(&server).await;
+
+        let answer = products
+            .screener(
+                "US",
+                Some("NASDAQ"),
+                &[
+                    json!(["market_capitalization", ">", 300000000]),
+                    json!(["exchange", "=", "NASDAQ"]),
+                ],
+                Some("refund_5d_p.desc"),
+                50,
+                0,
+            )
+            .await
+            .expect("the screen answers");
+
+        assert_eq!(answer.provider, "eodhd");
+        assert_eq!(answer.count, 2);
+        // The rows are the vendor's objects: nulls and unknown columns included.
+        assert_eq!(Value::Array(answer.rows.clone()), rows);
+        // The lifted filter becomes exactly one triple, last, with the caller's spelling.
+        assert_eq!(Value::Array(answer.filters), wire);
+        assert_eq!(answer.sort.as_deref(), Some("refund_5d_p.desc"));
+        // Five units flat, filed under /screener for the caller in scope.
+        let usage = store.recorded_usage();
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].request_type, "/screener");
+        assert_eq!(usage[0].cost, 5);
+    }
+
+    #[tokio::test]
+    async fn a_screen_is_never_answered_from_a_cache() {
+        let server = MockServer::start().await;
+        mount_screen(&server, json!([["exchange", "=", "US"]]), json!({"data": []}), 200).await;
+        let (products, _, _) = setup(&server).await;
+
+        for _ in 0..2 {
+            products.screener("US", None, &[], None, 100, 0).await.unwrap();
+        }
+
+        assert_eq!(requests(&server).await, 2, "a screen is a question about now");
+    }
+
+    #[tokio::test]
+    async fn an_empty_screen_is_a_200_with_no_rows() {
+        let server = MockServer::start().await;
+        mount_screen(&server, json!([["exchange", "=", "AU"]]), json!({"data": []}), 200).await;
+        let (products, _, _) = setup(&server).await;
+
+        let answer = products
+            .screener("AU", None, &[], None, 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(answer.count, 0);
+        assert!(answer.rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_vendor_envelope_without_data_is_a_502_rather_than_an_empty_screen() {
+        let server = MockServer::start().await;
+        mount_screen(&server, json!([["exchange", "=", "US"]]), json!({"rows": []}), 200).await;
+        let (products, _, _) = setup(&server).await;
+
+        match products.screener("US", None, &[], None, 100, 0).await {
+            Err(ProductError::Provider(failure)) => {
+                assert_eq!(failure.reason, "unparseable");
+                assert!(failure.detail.contains("data"), "{failure}");
+            }
+            other => panic!("expected an unparseable provider failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_vendor_422_is_a_caller_refusal_not_an_outage() {
+        let server = MockServer::start().await;
+        // A filter the local vocabulary accepts: the vendor can still refuse a query the table
+        // cannot predict, and that refusal is the caller's to fix, not an outage.
+        let filter = json!(["adjusted_close", ">", 1]);
+        mount_screen(
+            &server,
+            // The wire form carries the venue triple the endpoint appends.
+            json!([["adjusted_close", ">", 1], ["exchange", "=", "US"]]),
+            json!({"error": "Invalid filter value: adjusted_close"}),
+            422,
+        )
+        .await;
+        let (products, _, _) = setup(&server).await;
+
+        let error = refusal(
+            products
+                .screener("US", None, &[filter], None, 100, 0)
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(error.reason, "vendor-rejected");
+        assert_eq!(error.status, 422);
+        assert!(error.detail.contains("adjusted_close"), "{error}");
+    }
+
+    // -- POST /profile -----------------------------------------------------
+
+    #[tokio::test]
+    async fn a_profile_pins_the_code_and_the_venue_and_asks_for_five_rows() {
+        let server = MockServer::start().await;
+        mount_profile(
+            &server,
+            "WDS",
+            "AU",
+            Some(json!({
+                "code": "WDS", "exchange": "AU", "name": "Woodside Energy Group Ltd",
+                "sector": "Energy", "industry": "Oil & Gas E&P",
+                "market_capitalization": 51_234_567_890.0, "currency_symbol": "AUD",
+                "last_day_data_date": "2026-11-11"
+            })),
+        )
+        .await;
+        mount_profile(&server, "BHP", "AU", Some(json!({"code": "BHP", "name": "BHP Group Ltd"})))
+            .await;
+        let (products, store, _) = setup(&server).await;
+
+        let answer = products
+            .profiles(ProfileBatch {
+                symbols: &symbols(&["WDS", "BHP"]),
+                exchange: Some("ASX"),
+                country_code: Some("AU"),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(answer.exchange, "AU");
+        assert_eq!(answer.requested, 2);
+        assert!(answer.complete);
+        let wds = &answer.profiles["WDS"];
+        assert!(wds.found);
+        assert_eq!(wds.name.as_deref(), Some("Woodside Energy Group Ltd"));
+        assert_eq!(wds.sector.as_deref(), Some("Energy"));
+        assert_eq!(wds.market_cap, Some(51_234_567_890.0));
+        assert_eq!(wds.currency.as_deref(), Some("AUD"));
+        assert_eq!(wds.as_of.as_deref(), Some("2026-11-11"));
+        // No entitled source: the keys are present and null, not absent.
+        assert_eq!(wds.country, None);
+        assert_eq!(wds.gic_sector, None);
+        assert_eq!(wds.description, None);
+        assert_eq!(wds.error, None);
+
+        let sent = server.received_requests().await.unwrap();
+        assert_eq!(sent.len(), 2, "one pinned call per symbol");
+        for request in &sent {
+            assert_eq!(query(request, "limit"), Some("5".into()));
+            assert_eq!(query(request, "sort"), None);
+            let filters: Value =
+                serde_json::from_str(&query(request, "filters").unwrap()).unwrap();
+            // `code` alone is not unique: the exchange filter is what pins the listing.
+            assert_eq!(filters[0][0], "code");
+            assert_eq!(filters[1], json!(["exchange", "=", "AU"]));
+        }
+        // Five units per uncached symbol.
+        let usage = store.recorded_usage();
+        assert_eq!(usage.iter().map(|row| row.cost).sum::<i64>(), 10);
+    }
+
+    #[tokio::test]
+    async fn a_profile_memo_hit_costs_nothing_and_the_ttl_expires() {
+        let server = MockServer::start().await;
+        mount_profile(&server, "WDS", "AU", Some(json!({"code": "WDS", "name": "Woodside"}))).await;
+        let (products, store, clock) = setup(&server).await;
+        let wanted = symbols(&["WDS"]);
+
+        let batch = || ProfileBatch {
+            symbols: &wanted,
+            exchange: None,
+            country_code: Some("AU"),
+        };
+        products.profiles(batch()).await.unwrap();
+        assert_eq!(requests(&server).await, 1);
+
+        // A second read inside the hour spends nothing.
+        products.profiles(batch()).await.unwrap();
+        assert_eq!(requests(&server).await, 1);
+        assert_eq!(store.recorded_usage().len(), 1);
+
+        // Past the hour the profile is asked for again.
+        clock.advance_seconds(3601);
+        products.profiles(batch()).await.unwrap();
+        assert_eq!(requests(&server).await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_symbol_with_no_listing_is_found_false_and_is_never_memoised() {
+        let server = MockServer::start().await;
+        mount_profile(&server, "NOPE", "US", None).await;
+        let (products, _, _) = setup(&server).await;
+        let wanted = symbols(&["NOPE"]);
+        let batch = || ProfileBatch {
+            symbols: &wanted,
+            exchange: None,
+            country_code: Some("US"),
+        };
+
+        let answer = products.profiles(batch()).await.unwrap();
+        assert!(!answer.complete);
+        assert_eq!(answer.missing, vec!["NOPE".to_string()]);
+        assert!(!answer.profiles["NOPE"].found);
+        assert_eq!(answer.profiles["NOPE"].error, None);
+
+        // A miss is not an answer: the next pass asks again rather than caching "not there".
+        products.profiles(batch()).await.unwrap();
+        assert_eq!(requests(&server).await, 2);
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_profile_symbol_is_asked_once() {
+        let server = MockServer::start().await;
+        mount_profile(&server, "WDS", "AU", Some(json!({"code": "WDS", "name": "Woodside"}))).await;
+        let (products, _, _) = setup(&server).await;
+
+        products
+            .profiles(ProfileBatch {
+                symbols: &symbols(&["WDS", "WDS.AU", "wds"]),
+                exchange: None,
+                country_code: Some("AU"),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(requests(&server).await, 1);
+    }
+
+    #[tokio::test]
+    async fn one_failed_profile_call_is_that_symbol_only() {
+        let server = MockServer::start().await;
+        mount_profile(&server, "WDS", "AU", Some(json!({"code": "WDS", "name": "Woodside"}))).await;
+        // The vendor refuses one symbol's query; the batch must still answer the other.
+        mount_screen(
+            &server,
+            json!([["code", "=", "BAD"], ["exchange", "=", "AU"]]),
+            json!({"error": "boom"}),
+            500,
+        )
+        .await;
+        let (products, _, _) = setup(&server).await;
+
+        let answer = products
+            .profiles(ProfileBatch {
+                symbols: &symbols(&["WDS", "BAD"]),
+                exchange: None,
+                country_code: Some("AU"),
+            })
+            .await
+            .unwrap();
+
+        assert!(answer.profiles["WDS"].found);
+        assert!(!answer.profiles["BAD"].found);
+        assert_eq!(answer.profiles["BAD"].error.as_deref(), Some("http-error"));
+        assert!(!answer.complete);
+        assert!(answer.missing.contains(&"BAD".to_string()));
+    }
+
+    // -- POST /bars/intraday -----------------------------------------------
+
+    /// `count` native 5-minute rows from 14:30 UTC on 2026-11-12 (09:30 in New York).
+    fn intraday_payload(count: usize) -> Value {
+        let rows: Vec<Value> = (0..count)
+            .map(|index| {
+                let minute = 14 * 60 + 30 + index * 5;
+                let stamp = format!(
+                    "2026-11-12 {:02}:{:02}:00",
+                    minute / 60,
+                    minute % 60
+                );
+                json!({
+                    "date": stamp,
+                    "open": 100.0 + index as f64,
+                    "high": 101.0 + index as f64,
+                    "low": 99.0 + index as f64,
+                    "close": 100.5 + index as f64,
+                    "volume": 1000
+                })
+            })
+            .collect();
+        Value::Array(rows)
+    }
+
+    async fn mount_intraday(server: &MockServer, symbol: &str, count: usize) {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/intraday/{symbol}.US")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(intraday_payload(count)))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn an_intraday_fetch_stores_the_native_rows_and_anchors_four_hour_buckets() {
+        let server = MockServer::start().await;
+        mount_intraday(&server, "TTD", 78).await;
+        let (products, store, _) = setup(&server).await;
+
+        let answer = products
+            .intraday(IntradayRequest {
+                symbols: &symbols(&["TTD"]),
+                timeframe: Timeframe::FourHour,
+                limit: 2,
+                allow_fetch: true,
+                exchange: None,
+                country_code: Some("US"),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(answer.provider, "eodhd");
+        assert_eq!(answer.fetched, vec!["TTD".to_string()]);
+        assert!(answer.short_history.is_empty());
+        let series = &answer.bars["TTD"];
+        // One tape, one scale: the vendor's intraday series is unadjusted.
+        assert!(!series.adjusted);
+        assert_eq!(series.provider, "eodhd");
+        // 78 bars from 09:30 ET: one full 48-bar bucket and a short 30-bar one.
+        assert_eq!(series.rows.len(), 2);
+        assert_eq!(series.rows[1].v, Some(30_000));
+        // The first bucket opens at the session's first 5-minute bar, in exchange-local time.
+        assert_eq!(series.rows[0].d, "2026-11-12T09:30:00");
+        assert_eq!(series.rows[1].d, "2026-11-12T13:30:00");
+        assert_eq!(series.as_of_session.as_deref(), Some("2026-11-12"));
+        // Only the native rows are stored: a derived bucket would let the two disagree.
+        assert_eq!(store.intraday_rows("US", "TTD"), 78);
+        let usage = store.recorded_usage();
+        assert_eq!(usage.len(), 1);
+        assert_eq!(usage[0].request_type, "/intraday/");
+        assert_eq!(usage[0].cost, 5);
+    }
+
+    #[tokio::test]
+    async fn a_second_intraday_read_inside_the_ttl_spends_nothing() {
+        let server = MockServer::start().await;
+        mount_intraday(&server, "TTD", 78).await;
+        let (products, _, clock) = setup(&server).await;
+        let wanted = symbols(&["TTD"]);
+        let request = || IntradayRequest {
+            symbols: &wanted,
+            timeframe: Timeframe::FiveMin,
+            limit: 78,
+            allow_fetch: true,
+            exchange: None,
+            country_code: Some("US"),
+        };
+
+        products.intraday(request()).await.unwrap();
+        assert_eq!(requests(&server).await, 1);
+
+        let answer = products.intraday(request()).await.unwrap();
+        assert_eq!(requests(&server).await, 1, "inside the TTL is a cache hit");
+        assert!(answer.fetched.is_empty());
+        assert_eq!(answer.provider, "cache");
+        assert_eq!(answer.bars["TTD"].source, "cache");
+
+        // Past the TTL the tape is refreshed.
+        clock.advance_seconds(301);
+        let answer = products.intraday(request()).await.unwrap();
+        assert_eq!(requests(&server).await, 2);
+        assert_eq!(answer.fetched, vec!["TTD".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn an_intraday_cache_only_request_reports_a_symbol_with_no_tape_as_short() {
+        let server = MockServer::start().await;
+        let (products, _, _) = setup(&server).await;
+
+        let answer = products
+            .intraday(IntradayRequest {
+                symbols: &symbols(&["TTD"]),
+                timeframe: Timeframe::OneHour,
+                limit: 8,
+                allow_fetch: false,
+                exchange: None,
+                country_code: Some("US"),
+            })
+            .await
+            .unwrap();
+
+        assert!(answer.bars.is_empty());
+        assert_eq!(answer.short_history, vec!["TTD".to_string()]);
+        assert_eq!(requests(&server).await, 0, "cache-only never calls the vendor");
+    }
+
+    // -- POST /bars/bulk ---------------------------------------------------
+
+    /// Two rows for the 2026-11-11 session, as `/eod-bulk-last-day` answers.
+    fn bulk_payload() -> Value {
+        json!([
+            {"code": "AAPL.US", "date": "2026-11-11", "open": 230.0, "high": 233.0,
+             "low": 229.0, "close": 231.7, "adjusted_close": 231.4, "volume": 51_000_000},
+            {"code": "MSFT.US", "date": "2026-11-11", "open": 510.0, "high": 514.0,
+             "low": 509.0, "close": 512.9, "adjusted_close": 512.7, "volume": 21_000_000}
+        ])
+    }
+
+    async fn mount_bulk(server: &MockServer, date_param: &str, body: Value) {
+        Mock::given(method("GET"))
+            .and(path("/api/eod-bulk-last-day/US"))
+            .and(query_param("date", date_param))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+
+    fn bulk_at(session: NaiveDate) -> BulkDateKey {
+        BulkDateKey::Session(session)
+    }
+
+    #[tokio::test]
+    async fn a_bulk_pull_writes_the_marker_and_the_next_read_is_a_cache_answer() {
+        let server = MockServer::start().await;
+        mount_bulk(&server, "2026-11-11", bulk_payload()).await;
+        let (products, store, _) = setup(&server).await;
+        let dates = [bulk_at(date(2026, 11, 11))];
+
+        let first = products
+            .bulk_closes("US", &dates, true)
+            .await
+            .expect("the pull answers");
+        assert_eq!(first.provider, "eodhd");
+        assert!(first.partial.is_empty());
+        assert_eq!(first.dates["2026-11-11"].session, "2026-11-11");
+        // `c` is the adjusted close: return windows are computed from that series.
+        assert_eq!(first.dates["2026-11-11"].rows["AAPL"].c, 231.4);
+        assert_eq!(first.dates["2026-11-11"].rows["MSFT"].c, 512.7);
+        // The completeness fact is recorded, and the rows landed in DailySnapshot.
+        assert_eq!(store.bulk_pulls().len(), 1);
+        assert_eq!(store.daily_rows("US", "AAPL").len(), 1);
+
+        let second = products.bulk_closes("US", &dates, false).await.unwrap();
+        assert_eq!(second.provider, "cache");
+        assert_eq!(requests(&server).await, 1, "a marked session is free");
+        assert_eq!(second.dates["2026-11-11"].rows["AAPL"].c, 231.4);
+    }
+
+    #[tokio::test]
+    async fn a_cache_only_bulk_request_for_an_unpulled_session_is_a_404() {
+        let server = MockServer::start().await;
+        let (products, _, _) = setup(&server).await;
+
+        let error = refusal(
+            products
+                .bulk_closes("US", &[bulk_at(date(2026, 11, 7))], false)
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(error.reason, "not-pulled");
+        assert_eq!(error.status, 404);
+        assert!(error.detail.contains("2026-11-07"), "{error}");
+        assert!(error.detail.contains("partial session"), "{error}");
+        assert_eq!(requests(&server).await, 0);
+    }
+
+    #[tokio::test]
+    async fn two_uncached_bulk_dates_cost_two_pulls_and_the_second_is_cache() {
+        let server = MockServer::start().await;
+        mount_bulk(&server, "2026-11-11", bulk_payload()).await;
+        mount_bulk(
+            &server,
+            "2026-08-13",
+            json!([{"code": "AAPL.US", "date": "2026-08-13", "open": 218.0, "high": 220.0,
+                    "low": 217.0, "close": 219.2, "adjusted_close": 218.9, "volume": 40_000_000}]),
+        )
+        .await;
+        let (products, store, _) = setup(&server).await;
+
+        let answer = products
+            .bulk_closes(
+                "US",
+                &[bulk_at(date(2026, 11, 11)), bulk_at(date(2026, 8, 13))],
+                true,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(requests(&server).await, 2);
+        assert_eq!(answer.dates["2026-08-13"].rows["AAPL"].c, 218.9);
+        let usage = store.recorded_usage();
+        assert_eq!(usage.iter().map(|row| row.cost).sum::<i64>(), 200);
+    }
+
+    #[tokio::test]
+    async fn latest_resolves_through_the_completed_session_rule() {
+        let server = MockServer::start().await;
+        mount_bulk(&server, "2026-11-11", bulk_payload()).await;
+        let (products, _, _) = setup(&server).await;
+
+        let answer = products
+            .bulk_closes("US", &[BulkDateKey::Latest], true)
+            .await
+            .unwrap();
+
+        // At 21:00 UTC on the 12th, New York is 16:00 EST: the 12th has closed but not settled
+        // (close + 3h is 19:00 EST), so `latest` is the 11th — and the key stays "latest".
+        assert_eq!(answer.dates["latest"].session, "2026-11-11");
+        assert_eq!(requests(&server).await, 1);
+    }
+
+    #[tokio::test]
+    async fn a_pull_far_below_the_previous_session_is_partial_and_writes_no_marker() {
+        let server = MockServer::start().await;
+        // 1,881 rows against a 27,714-row baseline is the live evidence for this rule; two
+        // against ten is the same shape without the fixture.
+        mount_bulk(&server, "2026-11-11", bulk_payload()).await;
+        let store = Arc::new(FakeStore::new());
+        store.seed_bulk_pull("US", date(2026, 11, 10), 20);
+        let clock = egress_clock();
+        store.set_now(clock.now_utc().naive_utc());
+        let provider = Arc::new(FakeProvider::new("eodhd"));
+        let client = Arc::new(
+            EodhdClient::new("test-key", format!("{}/api", server.uri()), 5.0, 5.0).unwrap(),
+        );
+        let products = Products::new(
+            common::test_settings(),
+            store.clone(),
+            Some(client),
+            Some(common::router_with(&provider)),
+            clock,
+        )
+        .await
+        .unwrap();
+
+        let answer = products
+            .bulk_closes("US", &[bulk_at(date(2026, 11, 11))], true)
+            .await
+            .unwrap();
+
+        assert_eq!(answer.partial, vec!["2026-11-11".to_string()]);
+        // Upserted, but unmarked: a later cache read refuses rather than serving it as whole.
+        assert_eq!(store.daily_rows("US", "AAPL").len(), 1);
+        assert_eq!(store.bulk_pulls().len(), 1, "only the seeded baseline");
+        let error = refusal(
+            products
+                .bulk_closes("US", &[bulk_at(date(2026, 11, 11))], false)
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(error.reason, "not-pulled");
+    }
+}

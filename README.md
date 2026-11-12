@@ -182,7 +182,8 @@ minute, and caching the failure would hide a recovery.
       "symbol": "AAPL", "value": 5.82, "percent": 2.515, "reference_price": 231.4,
       "period": 14, "method": "tr", "smoothing": "simple",
       "sessions_used": 51, "as_of_session": "2026-10-14",
-      "source": "indicator_cache", "reason": null, "stop_level": 225.58
+      "source": "indicator_cache", "reason": null, "stop_level": 225.58,
+      "tick": 0.01, "ticks": 582.0, "tick_percent": 0.0043
     }
   },
   "exchange": "US",
@@ -199,6 +200,18 @@ definition cannot be reproduced.
 - `stop_level` is returned only when `price` **and** `multiplier` are both supplied. The
   multiplier is never defaulted: the four books use 1.0, 1.0, 2.0 and 3.0, so a default would
   silently impose one book's risk on another's.
+
+**The ATR is served in the increments it can be traded in.** `tick` is the smallest price
+increment the resolved exchange quotes `reference_price` in, `ticks` is `value` in those
+increments, and `tick_percent` is the increment as a share of the reference price. They exist
+because `percent` cannot answer the only question that matters downstream: whether a stop is
+wider than the noise. An ATR of `0.005357` on a $0.135 ASX name is **1.07 ticks** — a stop at
+2.5× is 2.7 ticks wide against a one-tick spread, which is not a stop — while the same
+*percentage* at $50 is hundreds of ticks. This service owns the tick table (`domain::ticks`:
+$0.01 on the US tape; on the ASX $0.001 under $0.10, $0.005 to $2.00, $0.01 above) and it owns
+the exchange, so it is the only side of the estate that can compute the ratio. The step is
+`null` when the reference price cannot be quoted; callers must read that as *unjudged*, never as
+zero.
 
 **The ATR is one exchange's ATR.** `IndicatorCache` is keyed by `(symbol, exchange)`, so an ASX
 `CBA` is never served the US `CBA`'s volatility — which, with a symbol-only key, is exactly

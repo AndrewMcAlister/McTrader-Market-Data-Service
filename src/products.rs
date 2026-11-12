@@ -45,6 +45,7 @@ use crate::domain::screener::{
 };
 use crate::domain::sessions::{exchange_timezone, latest_completed_session};
 use crate::domain::symbols::{symbol_for_provider, ProviderId};
+use crate::domain::ticks;
 use crate::error::{py_repr, MarketDataError, ProviderFailure};
 use crate::presence::Presence;
 use crate::providers::base::{number, ProviderBar, ProviderQuote};
@@ -385,8 +386,35 @@ pub struct AtrReading {
     pub method: String,
     pub smoothing: String,
     pub sessions_used: Option<i64>,
+    /// How many ranges the value was actually averaged over.
+    ///
+    /// `sessions_used` is how many *bars were read*, which under `simple` is not the size of
+    /// the sample: ATR(14) off 51 bars reports 51, and that reads as a 51-session average when
+    /// it is a 14-session one. This states the sample. `null` only when the cache could not say.
+    pub sessions_averaged: Option<i64>,
+    /// Sessions in the window that did not move: `H == L == the previous close`.
+    ///
+    /// Counted as true ranges of zero they pull the mean down, and on a thin name that is most
+    /// of the difference between a stop that fits in the noise and one that does not. Reported
+    /// here and *not* excluded from `value`: excluding them widens every stop in the estate and
+    /// is a strategy change to be measured, not a fix to be applied quietly.
+    ///
+    /// `null` on a cache hit — the indicator cache stores the value and the depth it came from,
+    /// not the range series, and a guessed count would be worse than an absent one.
+    pub flat_sessions: Option<i64>,
     pub as_of_session: Option<String>,
     pub source: String,
+    /// The smallest increment the venue quotes `reference_price` in: $0.01 on the US tape, and
+    /// on the ASX $0.001 under $0.10, $0.005 to $2.00, $0.01 above it.
+    pub tick: Option<f64>,
+    /// `value` measured in ticks — the reading this service's ATR report asks for.
+    ///
+    /// Anything near 1 means the "average range" is one quote increment: the stop that follows
+    /// from it is inside the spread and cannot be a stop at all.
+    pub ticks: Option<f64>,
+    /// `tick` as a percentage of `reference_price` — the friction floor, to be read against
+    /// `percent`. At $3.00 the ASX step is 0.33%; at $0.135 it was 3.70%.
+    pub tick_percent: Option<f64>,
     #[serde(skip_serializing_if = "Presence::is_absent")]
     pub reason: Presence<String>,
     #[serde(skip_serializing_if = "Presence::is_absent")]
@@ -1435,6 +1463,7 @@ impl Products {
             };
             let value = hit.value(period).unwrap_or_default();
             let reference = hit.reference_price;
+            let step = reference.and_then(|price| ticks::price_step(&market, price));
             readings.insert(
                 symbol.clone(),
                 AtrReading {
@@ -1447,8 +1476,15 @@ impl Products {
                     method: method.clone(),
                     smoothing: smoothing.clone(),
                     sessions_used: hit.sessions_used.map(i64::from),
+                    sessions_averaged: hit.sessions_used.map(|sessions| {
+                        atr::sessions_averaged(period, &smoothing, sessions as usize)
+                    }),
+                    flat_sessions: None,
                     as_of_session: hit.as_of_session.map(|session| session.to_string()),
                     source: "indicator_cache".to_string(),
+                    tick: step,
+                    ticks: ticks::as_ticks(value, step).map(|ticks| round_to(ticks, 4)),
+                    tick_percent: atr::atr_percent(step, reference).map(|value| round_to(value, 4)),
                     reason: Presence::Absent,
                     stop_level: Presence::Absent,
                 },
@@ -1525,6 +1561,7 @@ impl Products {
 
                 let value = values.get(&period).copied().flatten();
                 let as_of_session = entry.and_then(|entry| entry.as_of_session.clone());
+                let step = reference.and_then(|price| ticks::price_step(&market, price));
                 readings.insert(
                     symbol.clone(),
                     AtrReading {
@@ -1536,8 +1573,20 @@ impl Products {
                         method: method.clone(),
                         smoothing: smoothing.clone(),
                         sessions_used: Some(rows.len() as i64),
+                        sessions_averaged: Some(atr::sessions_averaged(
+                            period,
+                            &smoothing,
+                            rows.len(),
+                        )),
+                        flat_sessions: Some(atr::flat_sessions(&highs, &lows, &closes)),
                         as_of_session,
                         source: "computed".to_string(),
+                        tick: step,
+                        ticks: value
+                            .and_then(|value| ticks::as_ticks(value, step))
+                            .map(|ticks| round_to(ticks, 4)),
+                        tick_percent: atr::atr_percent(step, reference)
+                            .map(|value| round_to(value, 4)),
                         reason: if value.is_some() {
                             Presence::Null
                         } else {
@@ -2633,8 +2682,13 @@ fn unavailable_reading(
         method: method.to_string(),
         smoothing: smoothing.to_string(),
         sessions_used: Some(sessions as i64),
+        sessions_averaged: None,
+        flat_sessions: None,
         as_of_session: None,
         source: "unavailable".to_string(),
+        tick: None,
+        ticks: None,
+        tick_percent: None,
         reason: Presence::Value("no completed daily bars".to_string()),
         stop_level: Presence::Absent,
     }

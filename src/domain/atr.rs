@@ -98,6 +98,51 @@ pub fn true_ranges(
     Ok(ranges)
 }
 
+/// How many sessions in the window were flat: `H == L`, and equal to the previous close.
+///
+/// # Reported, not acted on
+///
+/// A session that never moved *within a tick* is not a zero-volatility day, it is a day with
+/// no observed range — a stale bar, a halt, or a quote pinned to one tick. Counted as a true
+/// range of zero they drag the mean down: on STP 2 of the last 14 and 9 of the last 51
+/// sessions were flat, and excluding them moved ATR(14) from 3.97% to 4.63% and ATR(50) from
+/// 5.30% to 6.48%.
+///
+/// This function only counts them. It is deliberately not wired into
+/// [`average_true_range`], because excluding them widens every stop, every position size and
+/// every backtested metric in the estate — a strategy change that has to be measured first,
+/// not a bug fix that can be shipped quietly.
+///
+/// The first session has no previous close, so a flat first bar is counted on `H == L` alone.
+pub fn flat_sessions(highs: &[f64], lows: &[f64], closes: &[f64]) -> i64 {
+    let count = highs.len().min(lows.len()).min(closes.len());
+    let mut flat = 0;
+    for index in 0..count {
+        if highs[index] != lows[index] {
+            continue;
+        }
+        if index == 0 || lows[index] == closes[index - 1] {
+            flat += 1;
+        }
+    }
+    flat
+}
+
+/// The number of ranges the reading at `period` was averaged over.
+///
+/// `sessions_used` answers "how many bars were read", which under `simple` is not the size of
+/// the sample the mean was taken over — a 14-session ATR off 51 bars reports 51 there, and
+/// that reads as a 51-day average. This states the sample: `period` under `simple`, and the
+/// whole series under `wilder` (the recursion consumes every earlier range).
+pub fn sessions_averaged(period: i64, smoothing: &str, available: usize) -> i64 {
+    let available = available as i64;
+    if smoothing == SMOOTHING_WILDER {
+        available
+    } else {
+        period.min(available)
+    }
+}
+
 /// The ATR over the last `period` ranges, or `None` when there is too little history.
 ///
 /// `None` rather than a guess: a stop placed from four sessions is not the stop the study
@@ -647,5 +692,43 @@ mod tests {
         .unwrap();
         assert!(tr > hl);
         assert!(tr / hl > 1.001);
+    }
+
+    #[test]
+    fn a_session_that_never_moved_is_flat() {
+        // 0.135 pinned for two sessions, then a real 3-cent range.
+        let highs = [0.135, 0.135, 0.15];
+        let lows = [0.135, 0.135, 0.12];
+        let closes = [0.135, 0.135, 0.14];
+        assert_eq!(flat_sessions(&highs, &lows, &closes), 2);
+    }
+
+    #[test]
+    fn inside_the_bar_movement_is_not_flat() {
+        // H != L on every session: a real range, however small.
+        let highs = [0.14, 0.14, 0.14];
+        let lows = [0.135, 0.135, 0.135];
+        let closes = [0.135, 0.135, 0.135];
+        assert_eq!(flat_sessions(&highs, &lows, &closes), 0);
+    }
+
+    #[test]
+    fn a_flat_bar_that_gapped_is_not_flat_against_the_previous_close() {
+        // H == L, but the level moved: gaps carry volatility, so this is not a stale bar.
+        let highs = [0.15, 0.16];
+        let lows = [0.15, 0.16];
+        let closes = [0.15, 0.16];
+        assert_eq!(flat_sessions(&highs, &lows, &closes), 1);
+    }
+
+    #[test]
+    fn the_sample_size_is_stated_rather_than_the_bar_count() {
+        // ATR(14) off 51 bars: the mean is over 14, not 51.
+        assert_eq!(sessions_averaged(14, SMOOTHING_SIMPLE, 51), 14);
+        // ...and never more than the ranges available.
+        assert_eq!(sessions_averaged(14, SMOOTHING_SIMPLE, 9), 9);
+        // Wilder consumes every earlier range, so the series is the sample.
+        assert_eq!(sessions_averaged(14, SMOOTHING_WILDER, 51), 51);
+        assert_eq!(sessions_averaged(14, SMOOTHING_WILDER, 0), 0);
     }
 }

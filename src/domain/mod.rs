@@ -12,3 +12,4 @@ pub mod intraday;
 pub mod screener;
 pub mod sessions;
 pub mod symbols;
+pub mod ticks;
